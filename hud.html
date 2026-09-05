@@ -883,17 +883,17 @@
   // What Nova is
   // doing is readable across the room without looking at any text.
   const STATES = {
-    idle:        { accent: "#c08cff", spin: 1.0, rings: 7, label: "Standby"      },
-    listening:   { accent: "#4dffc3", spin: 1.6, rings: 8, label: "Listening"    },
-    transcribing:{ accent: "#4dd2ff", spin: 2.6, rings: 8, label: "Transcribing" },
-    thinking:    { accent: "#ff4fd8", spin: 3.4, rings: 10, label: "Thinking",
+    idle:        { accent: "#c08cff", spin: 1.0, rings: 4, label: "Standby"      },
+    listening:   { accent: "#4dffc3", spin: 1.6, rings: 5, label: "Listening"    },
+    transcribing:{ accent: "#4dd2ff", spin: 2.6, rings: 5, label: "Transcribing" },
+    thinking:    { accent: "#ff4fd8", spin: 3.4, rings: 5, label: "Thinking",
                    prism: 0.55 },
-    tool:        { accent: "#ffc44d", spin: 2.8, rings: 10, label: "Working",
+    tool:        { accent: "#ffc44d", spin: 2.8, rings: 5, label: "Working",
                    prism: 1.0  },
-    speaking:    { accent: "#e6ccff", spin: 1.3, rings: 7, label: "Speaking"     },
-    remember:    { accent: "#8fff6e", spin: 1.8, rings: 8, label: "Remembering"  },
-    setup:       { accent: "#ff4fd8", spin: 1.0, rings: 5, label: "Setup needed" },
-    offline:     { accent: "#ff4d6d", spin: 0.6, rings: 4, label: "Offline"      }
+    speaking:    { accent: "#e6ccff", spin: 1.3, rings: 4, label: "Speaking"     },
+    remember:    { accent: "#8fff6e", spin: 1.8, rings: 5, label: "Remembering"  },
+    setup:       { accent: "#ff4fd8", spin: 1.0, rings: 3, label: "Setup needed" },
+    offline:     { accent: "#ff4d6d", spin: 0.6, rings: 3, label: "Offline"      }
   };
 
   function styleFor(m) { return STATES[m] || STATES.idle; }
@@ -940,23 +940,16 @@
 
   // Six rings defined, but each state draws only as many as it needs -- busier
   // work literally spins up more machinery.
-  // Ordered outside in, and drawn in order: a state showing N rings shows the
-  // first N, so the ones near the top carry the composition and the later ones
-  // are the machinery that spins up when she gets busy. Directions alternate
-  // and no two neighbours share a speed -- the slowest here takes eleven times
-  // longer to come round than the fastest, which is what stops the set reading
-  // as one rigid object turning.
+  // Five, spread across the radius and strictly alternating direction, so no
+  // two neighbours ever turn the same way. The slowest takes eight times longer
+  // to come round than the fastest -- enough that the set never reads as one
+  // rigid object, without the clutter of a dozen competing circles.
   const RINGS = [
     { r: 0.97, w: 1,   speed: -0.06, ticks: 72, tickLen: 0.030, alpha: 0.28 },
-    { r: 0.92, w: 1,   speed:  0.09, ticks: 8,  tickLen: 0.022, alpha: 0.20 },
     { r: 0.88, w: 1.5, speed:  0.14, ticks: 24, tickLen: 0.055, alpha: 0.52 },
-    { r: 0.82, w: 1,   speed: -0.11, ticks: 48, tickLen: 0.018, alpha: 0.22 },
     { r: 0.76, w: 1,   speed: -0.22, ticks: 12, tickLen: 0.040, alpha: 0.38 },
-    { r: 0.69, w: 1,   speed:  0.27, ticks: 4,  tickLen: 0.065, alpha: 0.30 },
     { r: 0.63, w: 2,   speed:  0.34, ticks: 6,  tickLen: 0.075, alpha: 0.78 },
-    { r: 0.57, w: 1,   speed: -0.40, ticks: 18, tickLen: 0.030, alpha: 0.26 },
-    { r: 0.52, w: 1,   speed: -0.48, ticks: 36, tickLen: 0.045, alpha: 0.42 },
-    { r: 0.44, w: 1.5, speed:  0.66, ticks: 3,  tickLen: 0.090, alpha: 0.60 }
+    { r: 0.52, w: 1,   speed: -0.48, ticks: 36, tickLen: 0.045, alpha: 0.42 }
   ];
 
   // A nova is a star flaring, so the core is a burst of rays rather than a
