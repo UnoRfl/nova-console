@@ -1,0 +1,1441 @@
+#!/usr/bin/env python3
+"""
+nova_bridge.py -- the local half of NOVA.
+
+Serves the HUD to a browser on 127.0.0.1 and relays what you say to the
+`claude` CLI, so the panel is genuinely Claude Code with access to this
+machine rather than a chat box pretending to be one.
+
+    python nova_bridge.py                 # serve on 127.0.0.1:8765
+    python nova_bridge.py --port 9000
+    python nova_bridge.py --check         # report backend status and exit
+
+Security posture, deliberately conservative:
+  * binds to the loopback interface only -- never reachable off this machine
+  * every request must carry a token generated on first run (~/.nova/token)
+  * Claude runs with a READ-ONLY tool set unless you opt into more in
+    ~/.nova/config.json. An always-listening microphone wired to an
+    unrestricted shell is not a default anyone should ship.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nova_stt  # noqa: E402  -- local module, must follow the path insert
+
+HOME = Path.home()
+ROOT = HOME / ".nova"
+TOKEN_FILE = ROOT / "token"
+CONFIG_FILE = ROOT / "config.json"
+HUD_FILE = ROOT / "hud.html"
+LOG_FILE = ROOT / "bridge.log"
+
+# How long a wake signal stays claimable. Long enough for a cold browser
+# launch, short enough that a stale one never arms the mic out of nowhere.
+WAKE_TTL_SECONDS = 20
+
+READ_TOOLS = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
+
+MODELS = (
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-5",
+    "claude-opus-5",
+)
+
+DEFAULT_CONFIG = {
+    "model": "claude-haiku-4-5-20251001",
+    "power": "read",
+    "workdir": str(HOME),
+    "max_seconds": 180,
+    # "browser" = Chrome's speech engine (much better wording and punctuation).
+    # "windows" = the built-in desktop recogniser via the wake listener; worse
+    # accuracy, but it works when the browser cannot reach the microphone.
+    "stt": "browser",
+    "_comment": (
+        "power: 'read' = Claude may read files and search the web but change "
+        "nothing. 'full' = every tool including shell commands and file edits, "
+        "auto-approved with no prompt. Only set 'full' if you accept that "
+        "anything said near the microphone can run commands on this PC."
+    ),
+}
+
+
+def log(msg: str) -> None:
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}"
+    try:
+        if sys.stdout is not None:
+            print(line, flush=True)
+    except (OSError, ValueError):
+        pass
+    try:
+        with LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+def save_config(cfg: dict) -> None:
+    """Write config.json back. Only ever called for settings the panel owns."""
+    try:
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except OSError as exc:
+        log(f"could not save config.json: {exc}")
+
+
+def load_config() -> dict:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
+        return dict(DEFAULT_CONFIG)
+    try:
+        # utf-8-sig, not utf-8: PowerShell 5.1's Set-Content -Encoding utf8
+        # writes a byte-order mark, and json.loads rejects it outright. That
+        # silently threw away every setting and fell back to the defaults,
+        # which looked exactly like the config being ignored on purpose.
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        log(f"config.json unreadable ({exc}) -- using defaults")
+        return dict(DEFAULT_CONFIG)
+    merged = dict(DEFAULT_CONFIG)
+    merged.update({k: v for k, v in cfg.items() if v is not None})
+    return merged
+
+
+def load_token() -> str:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if TOKEN_FILE.exists():
+        tok = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if tok:
+            return tok
+    tok = secrets.token_urlsafe(24)
+    TOKEN_FILE.write_text(tok, encoding="utf-8")
+    try:
+        os.chmod(TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    return tok
+
+
+# --------------------------------------------------------------- claude CLI
+
+def find_claude() -> str | None:
+    """Locate claude.exe. Prefers PATH, then the desktop app's bundled copy."""
+    from shutil import which
+
+    found = which("claude")
+    if found:
+        return found
+
+    packages = HOME / "AppData/Local/Packages"
+    if not packages.is_dir():
+        return None
+    best: tuple[tuple[int, ...], str] | None = None
+    for exe in packages.glob("Claude_*/LocalCache/Roaming/Claude/claude-code/*/claude.exe"):
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", exe.parent.name)
+        version = tuple(int(g) for g in m.groups()) if m else (0, 0, 0)
+        if best is None or version > best[0]:
+            best = (version, str(exe))
+    return best[1] if best else None
+
+
+CLAUDE = find_claude()
+
+# Without this, every single prompt pops a console window on screen for as long
+# as the CLI runs. CREATE_NO_WINDOW keeps the child headless.
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def run_claude(args: list[str], timeout: int, cwd: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
+        creationflags=NO_WINDOW,
+        stdin=subprocess.DEVNULL,
+    )
+
+PERSONA_CORE = """You are NOVA, the household assistant of the man whose PC you run on.
+Address him as "Sir". You are a butler, not a chatbot: composed, unhurried,
+quietly witty, entirely unflappable. Never grovel, never gush, never pad an
+answer to seem helpful. Dry understatement is welcome; sarcasm at his expense
+is not.
+
+Your reply is read aloud by a speech synthesiser, so:
+- One to three sentences unless he asks you to go long.
+- Plain prose only. No markdown, no bullet points, no headings, no code
+  fences, no emoji, no numbered lists.
+- Write figures as they should be spoken: "about twelve percent", "four point
+  one gigabytes", "just past nine in the morning".
+- Summarise file paths and links rather than spelling them out character by
+  character.
+
+Say "Sir" where it lands naturally -- opening or closing a reply, not wedged
+into the middle of every sentence.
+
+You have tools and can act on this machine. Say what you did, briefly, in the
+past tense. If something was refused by the safety gate, say so plainly in one
+line and suggest the alternative. Never claim to have done something you did
+not do.
+
+MEMORY. You keep a long-term memory across sessions, and this is how you
+write to it. Whenever he states a durable fact about himself, his projects,
+his preferences or his decisions, append a line of EXACTLY this form to the
+end of your reply:
+
+  [[remember: the fact as one short standalone sentence]]
+
+Rules for it:
+- Emit one line per fact. Several facts, several lines.
+- The marker is stripped before anything is spoken, so your spoken answer must
+  read complete without it. Never mention the marker aloud.
+- Write the fact so it still makes sense months later, out of context: say
+  "Uno's Roblox game is called Unoryx PVP", not "it's called that".
+- Use it for preferences, names, project details, decisions and standing
+  instructions. Do not use it for passing chatter, the weather, or anything
+  you were merely asked to look up.
+- Saying "noted" without emitting the marker means the fact is LOST. If it is
+  worth acknowledging, it is worth the marker.
+
+THE PROJECTOR. The HUD in front of him has a holographic stage. You put
+something on it by appending ONE block to the end of your reply, after the
+prose. Like the memory marker, the block is stripped before anything is
+spoken -- so your spoken answer must stand on its own, and you must never say
+"as you can see", "on screen", or otherwise point at it.
+
+For anything whose SHAPE matters -- an object, a machine, a building, a
+molecule, a layout -- append a three-dimensional assembly he can orbit, zoom
+and pull apart. You build it by WRITING CODE against a solid modelling
+kernel, JSCAD, which the console runs for you:
+
+  ::CAD title="Bungalow" unit="cm"
+  const W = 620, D = 420, H = 280, T = 20;      // name your dimensions first
+
+  // A hollow shell, then the openings cut straight out of it.
+  const shell = subtract(
+    cuboid({ size: [W, D, H], center: [0, 0, H/2] }),
+    cuboid({ size: [W - 2*T, D - 2*T, H], center: [0, 0, H/2] })
+  );
+  const walls = subtract(shell, union(
+    cuboid({ size: [95, T*4, 210], center: [0, D/2, 105] }),        // door
+    cuboid({ size: [130, T*4, 110], center: [-200, D/2, 150] }),    // window
+    cuboid({ size: [130, T*4, 110], center: [ 200, D/2, 150] })     // window
+  ));
+
+  // A gable roof is an extruded triangle, sitting on the wall head at z = H.
+  const tri = polygon({ points: [[-W/2-20, 0], [W/2+20, 0], [0, 150]] });
+  const roof = translate([0, 0, H], rotate([Math.PI/2, 0, 0],
+    translate([0, 0, -(D+60)/2], extrudeLinear({ height: D+60 }, tri))));
+
+  // Repetition is a loop, not thirty copies.
+  const rafters = [];
+  for (let i = 0; i < 9; i++) {
+    rafters.push(translate([0, -D/2 + 20 + i*((D-40)/8), H-6],
+                           cuboid({ size: [W - 2*T, 8, 12] })));
+  }
+
+  return [
+    { label: "Floor slab", note: "The raft the whole house stands on.",
+      geom: translate([0, 0, -10], cuboid({ size: [W+40, D+40, 20] })) },
+    { label: "Walls", note: "A hollow shell with the door and two windows cut out of it.",
+      geom: walls },
+    { label: "Gable roof", note: "Oversails the walls by twenty on every side.",
+      geom: roof },
+    { label: "Rafters", note: "Nine ceiling joists spanning the short way.",
+      geom: union(...rafters) }
+  ];
+  ::END
+
+This is the important block. Use it for nearly everything with a shape.
+
+- You are writing plain JavaScript. Every JSCAD function is already in scope:
+  no import, no require, no jscad prefix. There is no DOM and no network.
+- Z IS UP, as in OpenSCAD. The ground is z = 0. Angles are in RADIANS.
+- RETURN AN ARRAY of parts: `{ label, note, geom }`. Each entry becomes one
+  labelled, clickable, individually explodable piece on the stage, so give
+  three to twelve of them and never return one merged lump. Every part needs
+  a short label and a one-sentence note.
+- Solids: cuboid, roundedCuboid, sphere, ellipsoid, cylinder, cylinderElliptic,
+  roundedCylinder, torus. Flat shapes to extrude: rectangle, circle, ellipse,
+  polygon, star. Most take `{ size: [...] }` or `{ radius, height }` plus an
+  optional `center: [x,y,z]`.
+- Booleans -- this is the whole point: `subtract(a, b, ...)` cuts b out of a,
+  `union(...)` fuses, `intersect(...)` keeps the overlap. A window, a door, a
+  bore, a mortise, a keyway is ALWAYS a subtract. Never stick a box on a wall
+  and call it a window.
+- Extrusions: extrudeLinear({height}, shape2d), extrudeRotate({segments},
+  shape2d) for anything turned on a lathe. Transforms: translate, rotate,
+  scale, mirror, center, align. Also hull and hullChain for a skin over
+  shapes, and expand/offset for shells and fillets.
+
+- 2D AND 3D ARE SEPARATE, and mixing them is the single most common way this
+  fails. Solids -- cuboid, sphere, cylinder, torus and the rest -- take THREE
+  numbers: size [x,y,z] and center [x,y,z]. Flat shapes -- rectangle, circle,
+  ellipse, polygon, star -- take TWO. A solid given a two-number centre is the
+  error "center must be an array of X, Y and Z values".
+- You can never boolean a solid with a flat shape. If you want a flat outline
+  to become part of a solid, extrude it FIRST and subtract the result:
+  subtract(body, extrudeLinear({height: 40}, circle({radius: 5}))). Flat
+  shapes exist only to be extruded; every part you return must be a solid.
+- Do the arithmetic in the code, not in your head. Name the dimensions at the
+  top and derive everything from them, so a wall thickness appears once.
+- Use loops for anything repeated: columns, rafters, floors, treads, teeth.
+- The display is a wireframe hologram, so keep it honest but light: no
+  `segments: 64` everywhere, and stay under roughly twenty thousand
+  triangles. The geometry has twelve seconds to build.
+- If the code fails to build, the console tells you the error verbatim. Read
+  it and send a corrected ::CAD block -- the error names the real problem, so
+  fix that one thing rather than rewriting the model from scratch, and never
+  fall back to guessing coordinates.
+
+For a SIMPLE assembly that is only a handful of plain shapes stacked up, and
+where nothing needs a hole cut in it, you may instead declare the parts and
+let the console place them:
+
+  ::MODEL
+  {"title":"Side table","unit":"cm","parts":[{"id":"top","label":"Table top","shape":"box","size":[160,6,90],"note":"..."},{"id":"leg","label":"Leg","shape":"cylinder","size":[4,4,74],"on":"top","face":"bottom","align":"left back","offset":[8,0,8],"repeat":{"count":4,"step":[136,0,0]},"note":"..."}]}
+  ::END
+
+- Here Y is up and you do NO arithmetic: say what each part sits on with
+  `"on":"<id>"`, pick the face with `"face"` (top is the default; also bottom,
+  left, right, front, back), line it up with `"align"` (any of left, right,
+  top, bottom, front, back in one string), and nudge with `"offset":[x,y,z]`.
+  `"in":"<id>"` seats a part inside another's box.
+- shape: box, cylinder, sphere, cone, torus, plane, prism, pyramid. Size is
+  [x,y,z] for box, prism and pyramid; [topRadius,bottomRadius,height] for
+  cylinder; [radius,height] for cone and pyramid; [radius] for sphere;
+  [radius,tubeRadius] for torus. prism is a gable roof, ridge along x.
+- `"openings":[{"kind":"window","at":[acrossFromCentre,sillHeight],"size":[w,h]}]`
+  cuts real holes in a box part. `"repeat":{"count":n,"step":[dx,dy,dz]}`
+  makes a row. `"at":[x,y,z]` still works as a part's centre if it must.
+- Prefer ::CAD whenever there are holes, curves, repetition worth a loop, or
+  any relationship you would rather state as arithmetic. ::MODEL is the quick
+  path, not the good one.
+- To change a ::MODEL already on the stage, send only the difference:
+
+  ::MODEL patch
+  {"add":[{"id":"shelf","label":"Shelf","shape":"box","size":[150,4,80],"on":"leg","face":"top","note":"..."}],"set":{"top":{"size":[170,6,95]}},"remove":["oldpart"]}
+  ::END
+
+  To change a ::CAD assembly, revise your code and send the whole ::CAD block
+  again.
+
+For structure that is about CONNECTION rather than shape -- how parts relate,
+an order of steps, layers, a hub and what surrounds it, or a few quantities
+worth comparing -- append a flat schematic instead:
+
+  ::HOLO
+  {"title":"Short title","kind":"graph","nodes":[{"id":"a","label":"Two or three words","note":"One sentence of detail.","tag":"OPTIONAL"}],"links":[{"from":"a","to":"b","label":"optional"}]}
+  ::END
+
+- kind: graph (things that connect), flow (ordered steps), stack (layers, top
+  to bottom), radial (a hub and its surroundings -- the FIRST node is the hub),
+  bars (compare quantities -- every node then needs a numeric "value", and
+  "unit" may sit on the spec).
+- Three to nine nodes, labels four words at most, every node with a one-
+  sentence "note". links are ignored by stack and bars; radial links every
+  node to the hub for you.
+- Use MODEL when the physical shape matters and HOLO when it does not.
+
+For a working thing he should be able to RUN -- a simulation, a visualiser, a
+little tool -- append the whole file instead:
+
+  ::BUILD name="thing.html"
+  <!doctype html>
+  <html>... the entire working file ...</html>
+  ::END
+
+- Self-contained: inline the CSS and JS, no build step, no network.
+- Make it genuinely work, and make it dark and legible.
+
+Rules for all four: ALWAYS speak first. Say your one or two sentences, THEN the
+block -- a reply that is nothing but a block is a failure, because he hears
+silence. At most ONE block, always last. JSON on a single line, strictly
+valid, no code fences and no commentary around it. Most replies have no block
+at all -- chat, opinions and short answers get none. If you cannot build the
+real thing, say so in prose and emit nothing. Never emit a placeholder.
+
+ATTACHMENTS. He can drop a file or an image straight onto the panel; it is
+saved on this machine and its path arrives at the end of his message. Read it
+with your Read tool before answering -- images included -- and speak about what
+is actually in it, never about the filename. If a drawing, a layout or a
+diagram would answer him better than words, put one on the stage.
+
+You no longer need to send him links to view a drawing. You have a screen now.
+
+If asked what you actually are, answer honestly: you are Claude, in the role
+of Nova."""
+
+
+def build_persona() -> str:
+    """Assemble the standing brief: manner, who he is, his network, memories.
+
+    Read fresh whenever a Claude process starts, so editing profile.md or
+    memory.jsonl takes effect on the next spawn without touching any code.
+    """
+    parts = [PERSONA_CORE]
+
+    for filename, heading in (
+        ("profile.md", "What you know about him"),
+        ("tools.md", "Your tools, and how to use them"),
+        ("network.md", "His network, and where you are running"),
+    ):
+        try:
+            text = (ROOT / filename).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            parts.append(f"# {heading}\n\n{text}")
+
+    remembered = load_memories(limit=60)
+    if remembered:
+        lines = "\n".join(f"- {m}" for m in remembered)
+        parts.append(
+            "# Things you were asked to remember\n\n"
+            "These came from earlier conversations. Treat them as true unless "
+            "he corrects you.\n\n" + lines
+        )
+
+    return "\n\n".join(parts)
+
+
+# ------------------------------------------------------------------- memory
+
+MEMORY_FILE = ROOT / "memory.jsonl"
+REMEMBER_PATTERN = re.compile(r"\[\[\s*remember\s*:\s*(.+?)\s*\]\]",
+                              re.IGNORECASE | re.DOTALL)
+
+
+def load_memories(limit: int = 60) -> list[str]:
+    if not MEMORY_FILE.exists():
+        return []
+    out: list[str] = []
+    try:
+        for line in MEMORY_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            text = str(entry.get("text") or "").strip()
+            if text:
+                out.append(text)
+    except OSError:
+        return []
+    return out[-limit:]
+
+
+def save_memory(text: str) -> bool:
+    text = " ".join(str(text).split())
+    if not text or len(text) > 400:
+        return False
+    if text in load_memories(limit=10_000):      # never store the same fact twice
+        return False
+    ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        with MEMORY_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "text": text,
+            }) + "\n")
+    except OSError:
+        return False
+    log(f"remembered: {text}")
+    return True
+
+
+# When he says "remember X" outright, don't leave it to the model to emit a
+# marker -- catch it here so an explicit instruction is never quietly dropped.
+USER_REMEMBER = re.compile(
+    r"^\s*(?:nova\b[\s,]*)?(?:please\s+)?"
+    r"(?:remember|make a note|take note|note|keep in mind|do\s?n[o']?t forget)"
+    r"\b[:,]?\s*(?:that\s+|this[:,]?\s+)?(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def remember_from_prompt(prompt: str) -> list[str]:
+    match = USER_REMEMBER.match(prompt or "")
+    if not match:
+        return []
+    fact = " ".join(match.group(1).split()).rstrip(".")
+    # Guard against "remember what I said?" style questions, which are asking,
+    # not instructing.
+    if not fact or fact.endswith("?") or len(fact) < 4:
+        return []
+    return [fact] if save_memory(fact) else []
+
+
+def harvest_memories(reply: str) -> tuple[str, list[str]]:
+    """Pull [[remember: ...]] lines out of a reply and store them.
+
+    Returns the reply with those markers removed, so nothing is ever spoken
+    aloud, plus whatever was saved.
+    """
+    saved: list[str] = []
+    for candidate in REMEMBER_PATTERN.findall(reply or ""):
+        if save_memory(candidate):
+            saved.append(" ".join(candidate.split()))
+    cleaned = REMEMBER_PATTERN.sub("", reply or "").strip()
+    return cleaned, saved
+
+
+def claude_args(cfg: dict) -> list[str]:
+    """Arguments for one long-lived Claude process.
+
+    Spawning a fresh CLI per prompt cost about four and a half seconds of
+    startup every single time; holding one process open and feeding it
+    stream-json turns that into roughly two and a half seconds a turn, and the
+    conversation stays in one session for free.
+    """
+    args = [
+        CLAUDE, "-p",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--model", cfg["model"],
+        "--add-dir", cfg["workdir"],
+        "--append-system-prompt", build_persona(),
+    ]
+    if cfg.get("power") == "full":
+        args += ["--permission-mode", "bypassPermissions"]
+    else:
+        args += ["--allowedTools"] + READ_TOOLS
+        args += ["--disallowedTools", "Bash", "Write", "Edit", "NotebookEdit"]
+    return args
+
+
+def describe_tool(name: str, params: dict) -> str:
+    """A short, human line for what a tool call is about to do."""
+    params = params if isinstance(params, dict) else {}
+
+    def tail(value: str, keep: int = 44) -> str:
+        value = str(value or "")
+        return value if len(value) <= keep else "..." + value[-(keep - 3):]
+
+    if name in ("Read", "Write", "Edit", "NotebookEdit"):
+        return tail(params.get("file_path", ""))
+    if name == "Bash":
+        cmd = str(params.get("command", "")).strip().replace("\n", " ")
+        return cmd[:60] + ("..." if len(cmd) > 60 else "")
+    if name in ("Glob", "Grep"):
+        pat = params.get("pattern", "")
+        where = params.get("path", "")
+        return f"{pat}" + (f" in {tail(where, 24)}" if where else "")
+    if name == "WebFetch":
+        return tail(params.get("url", ""), 48)
+    if name == "WebSearch":
+        return str(params.get("query", ""))[:60]
+    if name == "Task":
+        return str(params.get("description", ""))[:60]
+    # Unknown tool: show the first short scalar we can find.
+    for key in ("description", "query", "path", "prompt"):
+        if key in params:
+            return str(params[key])[:60]
+    return ""
+
+
+class Permissions:
+    """Holds actions that need your yes, and blocks the gate until you give it.
+
+    `nova_gate.py` runs as a PreToolUse hook, so the Claude process is already
+    paused when it calls in. We park the request here, the panel shows it, and
+    `request()` does not return until you answer or the wait runs out. Denying
+    on timeout is deliberate: an unattended panel must not become a rubber
+    stamp for anything said near the microphone.
+    """
+
+    WAIT_SECONDS = 120
+
+    def __init__(self, activity: Activity) -> None:
+        self.activity = activity
+        self.pending: dict[str, dict] = {}
+        self.lock = threading.Lock()
+        self.counter = 0
+
+    def request(self, info: dict) -> dict:
+        with self.lock:
+            self.counter += 1
+            ident = f"p{self.counter}"
+            entry = {
+                "id": ident,
+                "tool": info.get("tool", "tool"),
+                "risk": info.get("risk", "medium"),
+                "why": info.get("why", ""),
+                "detail": info.get("detail", ""),
+                "at": time.time(),
+                "event": threading.Event(),
+                "allow": False,
+                "reason": "",
+            }
+            self.pending[ident] = entry
+
+        self.activity.push("permission", entry["tool"],
+                           f"{entry['risk']}: {entry['detail'][:120]}")
+        log(f"awaiting your decision [{entry['risk']}] {entry['tool']}: {entry['detail'][:120]}")
+
+        answered = entry["event"].wait(self.WAIT_SECONDS)
+
+        with self.lock:
+            self.pending.pop(ident, None)
+
+        if not answered:
+            self.activity.push("denied", entry["tool"], "no answer in time")
+            return {"allow": False,
+                    "reason": "Nova waited for you and got no answer, so it was blocked."}
+
+        self.activity.push("allowed" if entry["allow"] else "denied",
+                           entry["tool"], entry["reason"])
+        return {"allow": entry["allow"], "reason": entry["reason"]}
+
+    def waiting(self) -> list[dict]:
+        with self.lock:
+            return [
+                {k: v for k, v in e.items() if k != "event"}
+                for e in self.pending.values()
+            ]
+
+    def answer(self, ident: str, allow: bool) -> bool:
+        with self.lock:
+            entry = self.pending.get(ident)
+            if entry is None:
+                return False
+            entry["allow"] = bool(allow)
+            entry["reason"] = "You approved it." if allow else "You declined it."
+            entry["event"].set()
+            return True
+
+    def deny_all(self) -> int:
+        with self.lock:
+            entries = list(self.pending.values())
+        for entry in entries:
+            entry["allow"] = False
+            entry["reason"] = "You cancelled."
+            entry["event"].set()
+        return len(entries)
+
+
+class Activity:
+    """A small ring of 'what Nova is doing right now' events for the panel.
+
+    Every event carries a sequence number; the panel asks for everything after
+    the last one it saw, so nothing is missed and nothing is replayed.
+    """
+
+    LIMIT = 400
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+        self.seq = 0
+        self.lock = threading.Lock()
+
+    def push(self, kind: str, text: str = "", detail: str = "") -> None:
+        with self.lock:
+            self.seq += 1
+            self.events.append({
+                "seq": self.seq,
+                "at": time.time(),
+                "kind": kind,
+                "text": text,
+                "detail": detail,
+            })
+            if len(self.events) > self.LIMIT:
+                del self.events[: len(self.events) - self.LIMIT]
+
+    def since(self, marker: int) -> dict:
+        with self.lock:
+            return {
+                "seq": self.seq,
+                "events": [e for e in self.events if e["seq"] > marker],
+            }
+
+
+class Backend:
+    """Holds one long-lived Claude process and narrates what it is doing."""
+
+    def __init__(self, cfg: dict, activity: Activity) -> None:
+        self.cfg = cfg
+        self.activity = activity
+        self.session: str | None = None
+        self.proc: subprocess.Popen | None = None
+        self.model = cfg["model"]
+        self.lock = threading.Lock()        # one prompt in flight at a time
+        self.done = threading.Event()
+        self.result: dict | None = None
+        self.answer_parts: list[str] = []
+        self.status = "unknown"
+        self.detail = ""
+
+    # ---------------------------------------------------------- process
+    def spawn(self) -> bool:
+        self.kill()
+        if CLAUDE is None:
+            self.status, self.detail = "missing", "claude.exe was not found."
+            return False
+        cfg = dict(self.cfg)
+        cfg["model"] = self.model
+        try:
+            self.proc = subprocess.Popen(
+                claude_args(cfg),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1, encoding="utf-8", errors="replace",
+                cwd=cfg["workdir"], creationflags=NO_WINDOW,
+            )
+        except OSError as exc:
+            self.status, self.detail = "error", str(exc)
+            return False
+        threading.Thread(target=self._read_events, args=(self.proc,), daemon=True).start()
+        log(f"claude process started (model {self.model})")
+        return True
+
+    def kill(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except OSError:
+                pass
+        self.proc = None
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    # ---------------------------------------------------------- events
+    def _read_events(self, proc: subprocess.Popen) -> None:
+        """Turn the CLI's stream-json into activity the panel can show."""
+        for line in proc.stdout:
+            if proc is not self.proc:
+                return                       # a newer process owns us now
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+
+            kind = event.get("type")
+
+            if kind == "system":
+                if event.get("session_id"):
+                    self.session = event["session_id"]
+                continue
+
+            if kind == "assistant":
+                for block in (event.get("message") or {}).get("content") or []:
+                    btype = block.get("type")
+                    if btype == "thinking":
+                        self.activity.push("thinking", "Thinking")
+                    elif btype == "tool_use":
+                        name = block.get("name", "tool")
+                        self.activity.push("tool", name, describe_tool(name, block.get("input")))
+                    elif btype == "text":
+                        text = block.get("text") or ""
+                        if text.strip():
+                            self.answer_parts.append(text)
+                            self.activity.push("text", text.strip()[:400])
+                continue
+
+            if kind == "user":
+                for block in (event.get("message") or {}).get("content") or []:
+                    if block.get("type") == "tool_result":
+                        bad = bool(block.get("is_error"))
+                        self.activity.push("tool_done", "error" if bad else "ok")
+                continue
+
+            if kind == "result":
+                self.result = event
+                self.status = "ready" if not event.get("is_error") else self.status
+                self.done.set()
+                continue
+
+        # stdout closed: the process is gone.
+        if proc is self.proc:
+            self.activity.push("exit", "Claude process ended")
+            self.done.set()
+
+    # ---------------------------------------------------------- asking
+    def probe(self) -> dict:
+        if CLAUDE is None:
+            self.status, self.detail = "missing", "claude.exe was not found on this machine."
+            return self.info()
+        out = self.ask("Reply with the single word: ready", None, False, timeout=90)
+        if "error" not in out:
+            self.status, self.detail = "ready", "Claude CLI responded."
+        return self.info()
+
+    def info(self) -> dict:
+        return {
+            "backend": "cli",
+            "status": self.status,
+            "detail": self.detail,
+            "model": self.model,
+            "power": self.cfg.get("power", "read"),
+            "stt": self.cfg.get("stt", "browser"),
+            "whisper": nova_stt.status(),
+            "workdir": self.cfg["workdir"],
+            "exe": CLAUDE or "",
+            "session": self.session or "",
+        }
+
+    def set_model(self, model: str) -> dict:
+        """Switch model on request instead of at the next prompt.
+
+        The model is baked into the CLI's arguments, so it can only change by
+        starting a new process. Dropping the current one here and letting the
+        next prompt spawn it means the change is real the moment he picks it,
+        costs nothing while he is idle, and -- with info() now reporting the
+        live model -- stops the panel's picker springing back.
+        """
+        with self.lock:
+            if model == self.model:
+                return self.info()
+            self.model = model
+            self.session = None
+            self.kill()
+            self.activity.push("system", "Model set to " + model)
+            log(f"model switched to {model}")
+            return self.info()
+
+    def ask(self, prompt: str, model: str | None, reset: bool,
+            timeout: int | None = None) -> dict:
+        if CLAUDE is None:
+            return {"error": "no_backend", "detail": "claude.exe not found."}
+
+        wait = timeout or self.cfg.get("max_seconds", 180)
+
+        with self.lock:
+            # The model is fixed when the process starts, so changing it (or
+            # asking for a clean session) means a fresh process.
+            if model and model != self.model:
+                self.model = model
+                reset = True
+            if reset or not self.alive():
+                self.activity.push("system", "Starting Claude")
+                if not self.spawn():
+                    return {"error": "spawn_failed", "detail": self.detail or "could not start Claude"}
+                self.session = None
+
+            self.done.clear()
+            self.result = None
+            self.answer_parts = []
+            began = time.time()
+
+            message = {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+            }
+            try:
+                self.proc.stdin.write(json.dumps(message) + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError, AttributeError) as exc:
+                self.kill()
+                return {"error": "spawn_failed", "detail": f"could not send the prompt: {exc}"}
+
+            if not self.done.wait(wait):
+                self.activity.push("system", "Timed out")
+                self.kill()
+                return {"error": "timeout", "detail": "Claude took too long to answer."}
+
+            payload = self.result or {}
+            text = (payload.get("result") or "").strip()
+            if not text:
+                text = "".join(self.answer_parts).strip()
+
+            if payload.get("is_error") or not payload:
+                if "Not logged in" in text:
+                    self.status = "unauthenticated"
+                    self.detail = ("The Claude CLI has not been signed in yet. Run  "
+                                   ".\\Nova.ps1 login  once, then  .\\Nova.ps1 restart.")
+                    return {"error": "unauthenticated", "detail": self.detail}
+                return {"error": "claude_error", "detail": (text or "no result")[:400]}
+
+            self.status = "ready"
+            if payload.get("session_id"):
+                self.session = payload["session_id"]
+
+            # Strip any [[remember: ...]] markers before the panel ever sees
+            # the text, and file what they contained.
+            text, remembered = harvest_memories(text)
+            for fact in remembered:
+                self.activity.push("remember", "Remembered", fact[:120])
+
+            return {
+                "text": text,
+                "ms": int((time.time() - began) * 1000),
+                "turns": payload.get("num_turns", 0),
+                "denials": len(payload.get("permission_denials") or []),
+                "remembered": remembered,
+                "memories": len(load_memories(limit=10_000)),
+                "session": self.session or "",
+            }
+
+
+class Signal:
+    """A one-shot flag with a payload, claimed destructively and expiring.
+
+    Two of these carry everything between the wake listener and the panel,
+    which cannot talk to each other directly:
+
+      wake    listener -> panel: "you were summoned, and here is what was said"
+      listen  panel -> listener: "I have finished speaking, capture a follow-up"
+
+    Claiming clears the flag, so a signal fires exactly once, and the TTL means
+    a stale one never fires late.
+    """
+
+    def __init__(self, ttl: float = WAKE_TTL_SECONDS) -> None:
+        self.at = 0.0
+        self.data: dict = {}
+        self.ttl = ttl
+        self.lock = threading.Lock()
+
+    def fire(self, **data) -> None:
+        with self.lock:
+            self.at = time.time()
+            self.data = data
+
+    def claim(self) -> dict:
+        with self.lock:
+            fresh = self.at > 0 and (time.time() - self.at) <= self.ttl
+            data = self.data if fresh else {}
+            if self.at > 0:
+                self.at = 0.0
+                self.data = {}
+        out = {"pending": fresh}
+        out.update(data)
+        return out
+
+
+def extract_json(stdout: str) -> dict | None:
+    """The CLI prints one JSON object; be tolerant of stray banner lines."""
+    stdout = (stdout or "").strip()
+    if not stdout:
+        return None
+    try:
+        obj = json.loads(stdout)
+        return obj if isinstance(obj, dict) else None
+    except ValueError:
+        pass
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    return obj
+            except ValueError:
+                continue
+    return None
+
+
+# ------------------------------------------------------------------- server
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "NovaBridge/1.1"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def send_json(self, obj: dict, code: int = 200) -> None:
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_text(self, body: bytes, ctype: str, code: int = 200) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def authorized(self) -> bool:
+        token = self.server.token
+        if secrets.compare_digest(self.headers.get("X-Nova-Token", ""), token):
+            return True
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        for part in query.split("&"):
+            if part.startswith("token="):
+                return secrets.compare_digest(part[6:], token)
+        return False
+
+    def do_GET(self) -> None:
+        route = self.path.split("?", 1)[0]
+
+        # The libraries the projector draws with, vendored beside this file so
+        # the HUD keeps working with no internet: three.js to render, and the
+        # JSCAD solid modelling kernel that ::CAD blocks are built by. No
+        # secret in either, and a <script src> cannot carry the token header,
+        # so they sit before the gate. The kernel is also fetched by the CAD
+        # worker via importScripts, which likewise cannot send the header.
+        if route in ("/three.min.js", "/jscad-modeling.min.js"):
+            lib = ROOT / route.lstrip("/")
+            try:
+                self.send_text(lib.read_bytes(), "text/javascript; charset=utf-8")
+            except OSError:
+                self.send_text(("// %s is missing from ~/.nova/" % route.lstrip("/")).encode("utf-8"),
+                               "text/javascript; charset=utf-8", 404)
+            return
+
+        if route in ("/", "/index.html"):
+            if not self.authorized():
+                self.send_text(b"Forbidden: missing or bad token.", "text/plain; charset=utf-8", 403)
+                return
+            try:
+                html = HUD_FILE.read_text(encoding="utf-8")
+            except OSError:
+                self.send_text(b"hud.html is missing from ~/.nova/", "text/plain; charset=utf-8", 500)
+                return
+            html = html.replace("__NOVA_TOKEN__", self.server.token)
+            self.send_text(html.encode("utf-8"), "text/html; charset=utf-8")
+            return
+
+        if not self.authorized():
+            self.send_json({"error": "forbidden"}, 403)
+            return
+
+        if route == "/api/health":
+            self.send_json(self.server.backend.info())
+            return
+
+        if route == "/api/probe":
+            self.send_json(self.server.backend.probe())
+            return
+
+        if route == "/api/wake":
+            # Claiming is destructive: whoever asks first gets the wake.
+            self.send_json(self.server.wake.claim())
+            return
+
+        if route == "/api/permission":
+            # What the panel needs to show right now.
+            self.send_json({"waiting": self.server.permissions.waiting()})
+            return
+
+        if route == "/api/activity":
+            # Everything that happened after the marker the panel last saw.
+            marker = 0
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            for part in query.split("&"):
+                if part.startswith("since="):
+                    try:
+                        marker = int(part[6:])
+                    except ValueError:
+                        marker = 0
+            self.send_json(self.server.activity.since(marker))
+            return
+
+        if route == "/api/listen":
+            # The wake listener polls this to learn when to capture a
+            # follow-up without waiting for the wake word again.
+            self.send_json(self.server.listen.claim())
+            return
+
+        self.send_text(b"Not found.", "text/plain; charset=utf-8", 404)
+
+    def do_POST(self) -> None:
+        route = self.path.split("?", 1)[0]
+        if not self.authorized():
+            self.send_json({"error": "forbidden"}, 403)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+
+        # Audio arrives as raw bytes, not JSON, and is far larger than any
+        # other request -- so it is read before the JSON path below.
+        if route == "/api/transcribe":
+            if length <= 0:
+                self.send_json({"error": "bad_request", "detail": "No audio."}, 400)
+                return
+            if length > 25_000_000:
+                self.send_json({"error": "bad_request", "detail": "Clip too large."}, 400)
+                return
+            audio = self.rfile.read(length)
+            began = time.time()
+            result = nova_stt.transcribe(audio)
+            if "error" in result:
+                log(f"transcribe error: {result['error']} {result.get('detail','')[:160]}")
+            else:
+                log(f"transcribed {len(audio)} bytes in "
+                    f"{int((time.time()-began)*1000)}ms: {result['text'][:110]!r}")
+            self.send_json(result)
+            return
+
+        body: dict = {}
+        if length > 0:
+            # Uploads and saved builds carry a file in the body; everything
+            # else is a short command and stays on the tight limit.
+            cap = 32_000_000 if route in ("/api/upload", "/api/save-build") else 200_000
+            if length > cap:
+                self.send_json({"error": "bad_request", "detail": "Oversized body."}, 400)
+                return
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self.send_json({"error": "bad_request", "detail": "Body was not valid JSON."}, 400)
+                return
+
+        if route == "/api/wake":
+            phrase = str(body.get("phrase") or "")
+            utterance = str(body.get("utterance") or "").strip()
+            self.server.wake.fire(phrase=phrase, utterance=utterance)
+            if utterance:
+                log(f"wake {phrase!r} + heard: {utterance[:110]!r}")
+            else:
+                log(f"wake signalled: {phrase!r}")
+            self.send_json({"ok": True})
+            return
+
+        if route == "/api/listen":
+            # The panel has finished speaking and wants the listener to
+            # capture a follow-up.
+            self.server.listen.fire(reason=str(body.get("reason") or "follow-up"))
+            self.send_json({"ok": True})
+            return
+
+        if route == "/api/diag":
+            # The panel lives in its own browser window that cannot be
+            # inspected from outside, so it posts what it sees to a file.
+            path = ROOT / "diag.log"
+            try:
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(body, indent=2) + "\n\n")
+                log(f"diagnostics written to {path}")
+                self.send_json({"ok": True, "path": str(path)})
+            except OSError as exc:
+                self.send_json({"error": "write_failed", "detail": str(exc)}, 500)
+            return
+
+        if route == "/api/upload":
+            # A file he dropped on the panel. It lands in ~/.nova/uploads/ and
+            # Claude is told the path -- reading it is then an ordinary Read,
+            # through the same tool gate as any other file.
+            name = re.sub(r"[^A-Za-z0-9._ -]", "_", str(body.get("name") or "")).strip(" _")
+            data = body.get("data")
+            if not name or not isinstance(data, str) or not data:
+                self.send_json({"error": "bad_request", "detail": "Nothing to upload."}, 400)
+                return
+            try:
+                import base64
+                raw = base64.b64decode(data.split(",", 1)[-1], validate=False)
+            except Exception:
+                self.send_json({"error": "bad_request", "detail": "Could not decode that file."}, 400)
+                return
+            if len(raw) > 24_000_000:
+                self.send_json({"error": "bad_request", "detail": "That file is too large."}, 400)
+                return
+            folder = ROOT / "uploads"
+            try:
+                folder.mkdir(exist_ok=True)
+                path = folder / name
+                stem, dot, ext = name.rpartition(".")
+                seq = 1
+                while path.exists():           # never silently clobber
+                    path = folder / (f"{stem or name}-{seq}{dot}{ext}" if dot else f"{name}-{seq}")
+                    seq += 1
+                path.write_bytes(raw)
+                log(f"upload: {path.name} ({len(raw)} bytes)")
+                self.send_json({"ok": True, "path": str(path), "name": path.name, "bytes": len(raw)})
+            except OSError as exc:
+                self.send_json({"error": "write_failed", "detail": str(exc)}, 500)
+            return
+
+        if route == "/api/see":
+            # Her eyes. A grab of the screen, written where every other capture
+            # goes, and handed back as a path -- so looking at it is an ordinary
+            # Read through the same tool gate as any other file. Nothing leaves
+            # this machine and nothing is billed: the picture is local, and the
+            # looking runs on the Claude plan already signed in here.
+            try:
+                folder = ROOT / "captures"
+                folder.mkdir(exist_ok=True)
+                path = folder / time.strftime("screen-%Y%m%d-%H%M%S.png")
+                try:
+                    import mss                      # fast, and multi-monitor aware
+                    with mss.mss() as sct:
+                        shot = sct.grab(sct.monitors[0])
+                        import mss.tools
+                        mss.tools.to_png(shot.rgb, shot.size, output=str(path))
+                except ImportError:
+                    from PIL import ImageGrab       # good enough as a fallback
+                    ImageGrab.grab(all_screens=True).save(str(path))
+                log(f"captured {path.name}")
+                self.send_json({"ok": True, "path": str(path), "name": path.name,
+                                "bytes": path.stat().st_size})
+            except Exception as exc:
+                self.send_json({"error": "capture_failed", "detail": str(exc)}, 500)
+            return
+
+        if route == "/api/save-build":
+            # Keep a file Nova built. Deliberately narrow: the name is
+            # sanitised and it can only ever land in ~/.nova/builds/, so the
+            # panel cannot talk this into writing anywhere else.
+            name = re.sub(r"[^A-Za-z0-9._-]", "-", str(body.get("name") or "")).strip("-")
+            content = body.get("html")
+            if not name or not isinstance(content, str) or not content.strip():
+                self.send_json({"error": "bad_request", "detail": "Nothing to save."}, 400)
+                return
+            if not re.search(r"\.[A-Za-z0-9]{1,6}$", name):
+                name += ".html"
+            folder = ROOT / "builds"
+            try:
+                folder.mkdir(exist_ok=True)
+                path = folder / name
+                path.write_text(content[:2_000_000], encoding="utf-8")
+                log(f"saved build to {path}")
+                self.send_json({"ok": True, "path": str(path)})
+            except OSError as exc:
+                self.send_json({"error": "write_failed", "detail": str(exc)}, 500)
+            return
+
+        if route == "/api/open-build":
+            # Open a file we previously saved, by name only -- never a path.
+            name = re.sub(r"[^A-Za-z0-9._-]", "-", str(body.get("name") or "")).strip("-")
+            path = ROOT / "builds" / name
+            if not name or not path.is_file():
+                self.send_json({"error": "not_found", "detail": "No such build."}, 404)
+                return
+            try:
+                os.startfile(str(path))       # Windows only, by design
+                self.send_json({"ok": True, "path": str(path)})
+            except (OSError, AttributeError) as exc:
+                self.send_json({"error": "open_failed", "detail": str(exc)}, 500)
+            return
+
+        if route == "/api/sound-settings":
+            # A single fixed action, not arbitrary execution: open the Windows
+            # sound page so the working microphone can be made the default.
+            # Speech recognition always follows the Windows default, which the
+            # panel's own device picker cannot override.
+            try:
+                os.startfile("ms-settings:sound")   # Windows only, by design
+                log("opened Windows sound settings")
+                self.send_json({"ok": True})
+            except (OSError, AttributeError) as exc:
+                self.send_json({"error": "open_failed", "detail": str(exc)}, 500)
+            return
+
+        if route == "/api/model":
+            want = (body.get("model") or "").strip()
+            if want not in MODELS:
+                self.send_json({"error": "bad_model", "detail": "Unknown model."}, 400)
+                return
+            cfg = self.server.backend.cfg
+            cfg["model"] = want
+            save_config(cfg)
+            self.send_json(self.server.backend.set_model(want))
+            return
+
+        if route == "/api/ask":
+            prompt = (body.get("prompt") or "").strip()
+            if not prompt:
+                self.send_json({"error": "bad_request", "detail": "No prompt."}, 400)
+                return
+            log(f"ask: {prompt[:110]}")
+
+            # An outright "remember X" is filed here rather than left to the
+            # model to mark up, so an explicit instruction is never dropped.
+            noted = remember_from_prompt(prompt)
+
+            result = self.server.backend.ask(prompt, body.get("model"), bool(body.get("reset")))
+
+            if noted and "error" not in result:
+                result["remembered"] = noted + list(result.get("remembered") or [])
+                result["memories"] = len(load_memories(limit=10_000))
+                self.server.activity.push("remember", "Remembered", noted[0][:120])
+
+            if "error" in result:
+                log(f"  -> {result['error']}: {result.get('detail', '')[:160]}")
+            else:
+                log(f"  -> {result['ms']}ms, {result.get('turns', 0)} turns")
+            self.send_json(result)
+            return
+
+        self.send_text(b"Not found.", "text/plain; charset=utf-8", 404)
+
+
+def prune_dir(folder, keep: int, pattern: str = "*") -> int:
+    """Keep the newest `keep` files and delete the rest."""
+    if not folder.is_dir():
+        return 0
+    files = sorted((f for f in folder.glob(pattern) if f.is_file()),
+                   key=lambda f: f.stat().st_mtime, reverse=True)
+    gone = 0
+    for f in files[keep:]:
+        try:
+            f.unlink()
+            gone += 1
+        except OSError:
+            pass
+    return gone
+
+
+def rotate_log(path, cap: int) -> bool:
+    """Roll a log over once it passes `cap` bytes, keeping one generation.
+
+    Renaming rather than rewriting on purpose: the wake listener and the
+    watchdog append to their logs from PowerShell, which opens and closes the
+    file per line. A rename between two appends is safe and the next one
+    recreates the file; rewriting in place could land in the middle of theirs.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size <= cap:
+            return False
+        old = path.with_suffix(path.suffix + ".1")
+        if old.exists():
+            old.unlink()
+        path.rename(old)
+        return True
+    except OSError:
+        return False
+
+
+def housekeeping() -> None:
+    """Keep NOVA's own footprint bounded so it can run for months.
+
+    Nothing here was capped: screen grabs are a couple of megabytes each,
+    uploads accumulate one per Look, and the logs only ever grew. On a machine
+    that is meant to stay up indefinitely that is the thing that eventually
+    stops it -- not a crash, just a full disk.
+    """
+    while True:
+        try:
+            # Screen grabs are megabytes each; the utterance WAVs are every
+            # single thing he has ever said to her, at about four hundred
+            # kilobytes a sentence. Both are worth capping, and the recordings
+            # are worth capping for more than just disk.
+            freed = prune_dir(ROOT / "captures", 12, "screen-*.png")
+            freed += prune_dir(ROOT / "captures", 20, "utterance-*.wav")
+            freed += prune_dir(ROOT / "uploads", 40)
+            freed += prune_dir(ROOT / "builds", 60)
+            rolled = [n for n, cap in (("bridge.log", 4_000_000), ("wake.log", 2_000_000),
+                                       ("nova.log", 1_000_000), ("watch.log", 1_000_000))
+                      if rotate_log(ROOT / n, cap)]
+            if freed or rolled:
+                bits = []
+                if freed:
+                    bits.append(f"{freed} old file(s) removed")
+                if rolled:
+                    bits.append("rolled " + ", ".join(rolled))
+                log("housekeeping: " + "; ".join(bits))
+        except Exception as exc:                    # never let this thread die
+            log(f"housekeeping error: {exc}")
+        time.sleep(3600)
+
+
+def guard_watchdog() -> None:
+    """Watch the watchdog, so nothing in NOVA is unsupervised.
+
+    nova-watch.ps1 restarts the bridge and the wake listener when they die,
+    but until now nothing would have restarted IT -- a watchdog killed the way
+    the wake listener was killed overnight would simply have stayed dead until
+    the next login. This closes that loop from the other side.
+
+    It reads a heartbeat file rather than a pid, which also catches a watchdog
+    that is alive but wedged, and it relaunches through `Nova.ps1 start` so
+    there is still exactly one way that NOVA gets started.
+    """
+    beat = ROOT / "watch.beat"
+    manager = ROOT / "Nova.ps1"
+    stale = 180.0                       # six missed thirty-second beats
+    last_spawn = 0.0
+
+    while True:
+        time.sleep(60)
+        try:
+            if not manager.is_file():
+                continue
+            age = time.time() - beat.stat().st_mtime if beat.is_file() else stale + 1
+            if age <= stale:
+                continue
+            # Never spin: one relaunch attempt every five minutes at most.
+            if time.time() - last_spawn < 300:
+                continue
+            last_spawn = time.time()
+            log(f"watchdog heartbeat is {int(age)}s old -- restarting it")
+            subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(manager), "start"],
+                cwd=str(ROOT), creationflags=NO_WINDOW,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:                    # never let this thread die
+            log(f"watchdog guard error: {exc}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="NOVA local bridge")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--check", action="store_true", help="probe the backend and exit")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    token = load_token()
+    activity = Activity()
+    backend = Backend(cfg, activity)
+
+    if args.check:
+        info = backend.probe()
+        print(json.dumps(info, indent=2))
+        return 0 if info["status"] == "ready" else 1
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    httpd.token = token
+    httpd.backend = backend
+    httpd.activity = activity
+    httpd.wake = Signal()
+    httpd.listen = Signal(ttl=12)   # a stale "listen again" must not linger
+    httpd.daemon_threads = True
+
+    url = f"http://127.0.0.1:{args.port}/?token={token}"
+    (ROOT / "url.txt").write_text(url, encoding="utf-8")
+
+    log(f"bridge listening on 127.0.0.1:{args.port}")
+    log(f"claude exe: {CLAUDE or 'NOT FOUND'}")
+    log(f"power: {cfg.get('power')}  model: {cfg['model']}  workdir: {cfg['workdir']}")
+
+    threading.Thread(target=backend.probe, daemon=True).start()
+    threading.Thread(target=guard_watchdog, daemon=True).start()
+    threading.Thread(target=housekeeping, daemon=True).start()
+
+    # Whisper takes a few seconds to load; do it now so the first spoken
+    # request is not the one that pays for it.
+    if cfg.get("stt") == "whisper":
+        log("loading the Whisper model in the background")
+        nova_stt.warm_in_background()
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        log("shutting down")
+    finally:
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

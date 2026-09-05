@@ -1,0 +1,33 @@
+# Everything NOVA writes while it runs. None of this belongs in a repository:
+# the token is a live credential, the logs and captures contain the owner's
+# voice and screen, and memory.jsonl is whatever they told her about themselves.
+
+token
+url.txt
+config.json
+*.log
+*.log.1
+*.pid
+watch.beat
+
+memory.jsonl
+profile.md
+network.md
+
+captures/
+uploads/
+builds/
+backups/
+logs/
+browser-profile/
+models/
+
+# Vendored third-party libraries -- fetched by .\fetch-vendor.ps1 so the repo
+# does not carry a megabyte of somebody else's minified code.
+three.min.js
+jscad-modeling.min.js
+
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

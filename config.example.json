@@ -1,0 +1,13 @@
+{
+  "model": "claude-haiku-4-5-20251001",
+  "power": "read",
+  "workdir": "%USERPROFILE%",
+  "max_seconds": 180,
+  "stt": "windows",
+  "whisper_model": "base.en",
+  "_power": "'read' = Claude may read files and search the web but change nothing. 'full' = every tool including shell commands and file edits, auto-approved with no prompt. Only set 'full' if you accept that anything said near the microphone can run commands on this PC.",
+  "_workdir": "The folder Claude is allowed to work in. Point it at a project to keep her scoped, or at your home folder to give her the run of the machine.",
+  "_stt": "Where your voice is captured and transcribed. 'windows' (recommended) = the wake listener records through Windows and hands the audio to local Whisper; the browser never touches the microphone, which is what makes it reliable. 'whisper' = the panel records in Chrome and the bridge transcribes. 'browser' = Chrome does both; fastest, least reliable.",
+  "_whisper_model": "tiny.en / base.en / small.en / medium.en -- bigger is more accurate and slower. base.en is the sweet spot on CPU: roughly four times faster than small.en with near-identical transcripts.",
+  "_model": "claude-haiku-4-5-20251001 (fast), claude-sonnet-5, or claude-opus-5 (best for geometry and code). Switch any time with: .\\Nova.ps1 model opus"
+}
