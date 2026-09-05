@@ -1,9 +1,9 @@
 # N O V A
 
-**A voice-driven console for Claude Code that runs on your own PC.**
+**A voice-driven assistant that runs on your own PC.**
 
 Say *"Nova"*. The panel chimes, listens, and answers out loud — and behind it
-is Claude Code with real access to the machine. The wake word runs offline,
+is Claude, with real access to the machine. The wake word runs offline,
 your voice is transcribed offline, and nothing is billed to an API key, because
 there isn't one: it drives the Claude CLI you're already signed into.
 
@@ -18,7 +18,7 @@ Three small processes and a web page:
 | Piece | What it does |
 |---|---|
 | `nova-wake.ps1` | Offline wake-word listener. Hears *"Nova"*, records, hands the audio to Whisper. |
-| `nova_bridge.py` | A localhost web server that holds one long-lived Claude Code process and relays to it. |
+| `nova_bridge.py` | A localhost web server that holds one long-lived Claude session and relays to it. |
 | `hud.html` | The panel: diagnostics, transcript, controls, and the projector. |
 | `nova-watch.ps1` | A watchdog that keeps the other two alive. The bridge keeps *it* alive in return. |
 
@@ -148,11 +148,13 @@ Only the wake word can do this — a cough, the television or someone else
 talking can't, because the interrupt lives behind the same offline matcher.
 
 **A core that tells you what she's doing.** Each state has its own colour,
-spin rate, ring count and number of arms on the star — standby, listening,
-transcribing, thinking, working, speaking, remembering. When she's genuinely
-working the core runs a **prism**: the hue rotates through the spectrum and
-the saturation climbs the longer the job goes on. Idle is a calm violet; three
-minutes into a build it's a rotating twelve-armed prism.
+spin rate and ring count — standby, listening, transcribing, thinking,
+working, speaking, remembering. Every change is one continuous motion: the
+angles are integrated rather than derived, the colour crossfades, and a state
+change spikes a surge that winds the rings up and lets them settle, so the
+acceleration itself is the notification. When she's genuinely working the core
+runs a **prism** — the hue rotates through the spectrum and the saturation
+climbs the longer the job goes on. Idle is a calm violet.
 
 **Memory.** She keeps durable facts across sessions in `memory.jsonl` by
 emitting a marker at the end of a reply. Say something about yourself once and
@@ -240,6 +242,6 @@ nvidia-cudnn-cu12`, then set `device="cuda"` in `nova_stt.py`.
 [three.js](https://threejs.org) (MIT) renders the projections.
 [JSCAD](https://github.com/jscad/OpenJSCAD.org) (MIT) is the solid-modelling
 kernel. [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT) does
-transcription. Claude Code is by [Anthropic](https://claude.com/claude-code).
+transcription. Claude is by [Anthropic](https://claude.com).
 
 Released under the [MIT Licence](LICENSE).
