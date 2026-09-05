@@ -817,7 +817,7 @@
     // Stamped on every real change of state so the prism knows how long she
     // has been at it -- re-entering the same mode must not reset the clock,
     // or a long job that ticks through sub-states never gets to look busy.
-    if (state.mode !== mode) state.modeSince = performance.now();
+    if (state.mode !== mode) { state.modeSince = performance.now(); coreSurge(); }
     state.mode = mode;
     els.chip.dataset.state = mode;
     const known = (typeof STATES !== "undefined") && STATES[mode];
@@ -877,30 +877,34 @@
     flare: css.getPropertyValue("--flare").trim()    || "#ff4fd8"
   };
 
-  // Every state gets its own colour, spin rate and ring count, so what Nova is
+  // Every state gets its own colour, spin rate and ring count. The star keeps
+  // its four arms throughout: it is the same object in every state, and only
+  // its colour and its speed say what she is doing.
+  // What Nova is
   // doing is readable across the room without looking at any text.
   const STATES = {
-    idle:        { accent: "#c08cff", spin: 1.0, rings: 4, spokes: 4,  label: "Standby"      },
-    listening:   { accent: "#4dffc3", spin: 1.6, rings: 5, spokes: 6,  label: "Listening"    },
-    transcribing:{ accent: "#4dd2ff", spin: 2.6, rings: 5, spokes: 8,  label: "Transcribing" },
-    thinking:    { accent: "#ff4fd8", spin: 3.4, rings: 6, spokes: 10, label: "Thinking",
+    idle:        { accent: "#c08cff", spin: 1.0, rings: 4, label: "Standby"      },
+    listening:   { accent: "#4dffc3", spin: 1.6, rings: 5, label: "Listening"    },
+    transcribing:{ accent: "#4dd2ff", spin: 2.6, rings: 5, label: "Transcribing" },
+    thinking:    { accent: "#ff4fd8", spin: 3.4, rings: 6, label: "Thinking",
                    prism: 0.55 },
-    tool:        { accent: "#ffc44d", spin: 2.8, rings: 6, spokes: 12, label: "Working",
+    tool:        { accent: "#ffc44d", spin: 2.8, rings: 6, label: "Working",
                    prism: 1.0  },
-    speaking:    { accent: "#e6ccff", spin: 1.3, rings: 4, spokes: 6,  label: "Speaking"     },
-    remember:    { accent: "#8fff6e", spin: 1.8, rings: 5, spokes: 8,  label: "Remembering"  },
-    setup:       { accent: "#ff4fd8", spin: 1.0, rings: 3, spokes: 4,  label: "Setup needed" },
-    offline:     { accent: "#ff4d6d", spin: 0.6, rings: 3, spokes: 3,  label: "Offline"      }
+    speaking:    { accent: "#e6ccff", spin: 1.3, rings: 4, label: "Speaking"     },
+    remember:    { accent: "#8fff6e", spin: 1.8, rings: 5, label: "Remembering"  },
+    setup:       { accent: "#ff4fd8", spin: 1.0, rings: 3, label: "Setup needed" },
+    offline:     { accent: "#ff4d6d", spin: 0.6, rings: 3, label: "Offline"      }
   };
 
   function styleFor(m) { return STATES[m] || STATES.idle; }
 
   /* When she is genuinely working the core stops being one colour and runs a
-     spectrum -- and the longer the work goes on, the wider the sweep and the
-     more spokes the star throws. Standing still she is a calm violet; three
-     minutes into building something she is a rotating prism with twelve arms.
-     That is the whole point: what she is doing should be readable from across
-     the room, and how HARD she is working should be readable too. */
+     spectrum -- and the longer the work goes on, the deeper the saturation.
+     Standing still she is a calm violet; three minutes into building something
+     she is a slowly rotating prism. The core eases toward whatever this
+     returns, so even a fast-moving target arrives as a sweep rather than a
+     switch. What she is doing should be readable from across the room, and how
+     HARD she is working should be readable too. */
   function prismAt(base, spread, t, age) {
     if (!spread) return base;
     const deep = Math.min(1, age / 90000);              // ninety seconds to full
@@ -946,8 +950,7 @@
   ];
 
   // A nova is a star flaring, so the core is a burst of rays rather than a
-  // reactor plate: eight spokes, alternating long and short, spinning slowly
-  // against the rings.
+  // reactor plate: four arms, turning slowly against the rings.
   function drawBurst(accent, radius, drive, angle, spokeCount) {
     const spokes = spokeCount || 8;
     ctx2d.save();
@@ -977,17 +980,60 @@
     ctx2d.restore();
   }
 
+  /* ==================================================================
+     THE LIVING CORE
+     ------------------------------------------------------------------
+     Nothing here is read fresh from the current state and drawn. Every
+     quantity -- colour, speed, how many rings are present -- is a value
+     that EASES toward the state's target, so a change of mode is one
+     continuous motion rather than a cut.
+
+     The angles are integrated, never derived. The old core rotated by
+     `elapsed * ring.speed * look.spin`, which means the instant the speed
+     multiplier changed, every ring jumped by elapsed x speed x delta --
+     minutes of accumulated time applied in a single frame. That is what
+     made a state change look like somebody swapping the picture.
+
+     And the rings are squashed on a slow, per-ring cycle, so they read as
+     circles orbiting in space rather than flat discs sitting on glass.
+     ================================================================== */
+
+  const core = {
+    rgb:   [192, 140, 255],
+    spin:  1,
+    ring:  RINGS.map(() => 1),      // presence, 0..1 -- rings fade rather than pop
+    angle: RINGS.map(() => 0),      // accumulated rotation
+    phase: RINGS.map((_, i) => i * 1.7),
+    surge: 0,                       // spikes on a state change, then decays
+    burst: 0,                       // the star's own counter-rotation
+    last:  0
+  };
+
+  function hexRgb(hex) {
+    const h = hex.replace("#", "");
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  function rgbHex(c) {
+    return "#" + c.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+  }
+
+  // Called on every real change of state: the rings wind up, then settle back
+  // on their own. That acceleration IS the notification -- it reads from across
+  // the room without anything having to flash.
+  function coreSurge() { core.surge = 1; }
+
   function draw(t) {
     const S = side, c = S / 2, R = S / 2;
     ctx2d.clearRect(0, 0, S, S);
     const look = styleFor(state.mode);
-    const accent = reduceMotion ? look.accent
-                 : prismAt(look.accent, look.prism || 0, t, modeAge());
+
+    // Frame-rate independent easing: the same visual speed at 30fps or 144.
+    const dt = Math.max(1, Math.min(80, t - (core.last || t)));
+    core.last = t;
+    const ease = reduceMotion ? 1 : 1 - Math.exp(-dt / 190);
 
     let drive;
     if (state.mode === "listening") {
-      // In Windows-capture mode the panel has no microphone of its own, so
-      // fall back to a steady pulse rather than sitting inert at zero.
       drive = state.amp > 0.01 ? state.amp : 0.34 + 0.22 * Math.sin(t * 0.009);
     }
     else if (state.mode === "speaking")     drive = state.speakEnv;
@@ -997,26 +1043,49 @@
     else if (state.mode === "remember")     drive = 0.30 + 0.18 * Math.sin(t * 0.007);
     else                                    drive = 0.10 + 0.045 * Math.sin(t * 0.0013);
 
-    const spin = reduceMotion ? 0 : t * 0.001;
-    const rings = RINGS.slice(0, look.rings);
+    // ---- ease everything toward the state it is heading for ----
+    const want = hexRgb(reduceMotion ? look.accent
+                        : prismAt(look.accent, look.prism || 0, t, modeAge()));
+    for (let i = 0; i < 3; i++) core.rgb[i] += (want[i] - core.rgb[i]) * ease;
+    core.spin += ((look.spin || 1) - core.spin) * ease;
 
-    for (const ring of rings) {
-      const rr = R * ring.r * (1 + drive * 0.030);
+    const accent = rgbHex(core.rgb);
+    core.surge *= reduceMotion ? 0 : Math.exp(-dt / 430);
+
+    // ---- rings ----
+    const rush = 1 + core.surge * 2.4;
+    for (let i = 0; i < RINGS.length; i++) {
+      const ring = RINGS[i];
+      const wanted = i < look.rings ? 1 : 0;
+      core.ring[i] += (wanted - core.ring[i]) * ease;
+      if (!reduceMotion) core.angle[i] += ring.speed * core.spin * rush * dt * 0.0011;
+
+      const present = core.ring[i];
+      if (present < 0.015) continue;
+
+      // A slow, per-ring squash. Each ring breathes through its own ellipse on
+      // its own phase, which is what sells depth on a flat canvas.
+      const squash = reduceMotion ? 1
+                   : 1 - 0.30 * (0.5 + 0.5 * Math.sin(t * 0.00034 + core.phase[i]));
+      // Rings fade in from slightly outside, so arriving reads as approaching.
+      const rr = R * ring.r * (1 + drive * 0.030) * (0.86 + 0.14 * present);
+
       ctx2d.save();
       ctx2d.translate(c, c);
-      ctx2d.rotate(spin * ring.speed * look.spin);
+      ctx2d.scale(1, squash);
+      ctx2d.rotate(core.angle[i]);
 
       ctx2d.beginPath();
       ctx2d.arc(0, 0, rr, 0, Math.PI * 2);
       ctx2d.strokeStyle = accent;
-      ctx2d.globalAlpha = ring.alpha * (0.5 + drive * 0.5);
+      ctx2d.globalAlpha = ring.alpha * (0.5 + drive * 0.5) * present;
       ctx2d.lineWidth = ring.w;
       ctx2d.stroke();
 
-      ctx2d.globalAlpha = ring.alpha * 0.85;
+      ctx2d.globalAlpha = ring.alpha * 0.85 * present;
       ctx2d.lineWidth = 1;
-      for (let i = 0; i < ring.ticks; i++) {
-        const a = (i / ring.ticks) * Math.PI * 2;
+      for (let k = 0; k < ring.ticks; k++) {
+        const a = (k / ring.ticks) * Math.PI * 2;
         const inner = rr * (1 - ring.tickLen);
         ctx2d.beginPath();
         ctx2d.moveTo(Math.cos(a) * inner, Math.sin(a) * inner);
@@ -1024,10 +1093,12 @@
         ctx2d.stroke();
       }
 
-      ctx2d.globalAlpha = 1;
+      // The bright leading arc: it lengthens while the ring is winding up, so
+      // the acceleration is legible as shape and not only as speed.
+      ctx2d.globalAlpha = present;
       ctx2d.lineWidth = ring.w + 1.2;
       ctx2d.beginPath();
-      ctx2d.arc(0, 0, rr, 0, Math.PI * 0.34);
+      ctx2d.arc(0, 0, rr, 0, Math.PI * (0.34 + core.surge * 0.5));
       ctx2d.stroke();
       ctx2d.restore();
     }
@@ -1047,7 +1118,8 @@
     ctx2d.beginPath(); ctx2d.arc(0, 0, coreR * 2.4, 0, Math.PI * 2); ctx2d.fill();
 
     ctx2d.globalAlpha = 1;
-    drawBurst(accent, coreR * 1.5, drive, reduceMotion ? 0 : -spin * 0.35, look.spokes || 8);
+    if (!reduceMotion) core.burst -= core.spin * rush * dt * 0.00028;
+    drawBurst(accent, coreR * 1.5, drive, core.burst, 4);
 
     // white-hot centre
     const heart = ctx2d.createRadialGradient(0, 0, 0, 0, 0, coreR * 0.42);
