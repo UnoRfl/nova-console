@@ -994,16 +994,21 @@
      minutes of accumulated time applied in a single frame. That is what
      made a state change look like somebody swapping the picture.
 
-     And the rings are squashed on a slow, per-ring cycle, so they read as
-     circles orbiting in space rather than flat discs sitting on glass.
+     The rings themselves keep their radii, tick counts, speeds and weights.
+     What changed is how they get from one state to the next -- and that they
+     now lean, each on its own slow cycle, so the set reads as orbits in space
+     rather than circles printed on glass.
      ================================================================== */
+
+  // How far the rings lean. 0 = flat circles, 0.3 = heavily tilted.
+  const ORBIT = 0.20;
 
   const core = {
     rgb:   [192, 140, 255],
     spin:  1,
+    phase: RINGS.map((_, i) => i * 1.7),   // each ring tilts on its own clock
     ring:  RINGS.map(() => 1),      // presence, 0..1 -- rings fade rather than pop
     angle: RINGS.map(() => 0),      // accumulated rotation
-    phase: RINGS.map((_, i) => i * 1.7),
     surge: 0,                       // spikes on a state change, then decays
     burst: 0,                       // the star's own counter-rotation
     last:  0
@@ -1063,12 +1068,15 @@
       const present = core.ring[i];
       if (present < 0.015) continue;
 
-      // A slow, per-ring squash. Each ring breathes through its own ellipse on
-      // its own phase, which is what sells depth on a flat canvas.
+      const rr = R * ring.r * (1 + drive * 0.030);
+
+      // The orbit. Each ring leans through its own slow ellipse on its own
+      // phase, so they cross rather than sit concentric -- which is what reads
+      // as depth on a flat canvas. The radii are untouched: this tilts the
+      // rings he already liked, it does not resize or replace them. ORBIT is
+      // the whole dial; 0 gives back flat circles.
       const squash = reduceMotion ? 1
-                   : 1 - 0.30 * (0.5 + 0.5 * Math.sin(t * 0.00034 + core.phase[i]));
-      // Rings fade in from slightly outside, so arriving reads as approaching.
-      const rr = R * ring.r * (1 + drive * 0.030) * (0.86 + 0.14 * present);
+                   : 1 - ORBIT * (0.5 + 0.5 * Math.sin(t * 0.00026 + core.phase[i]));
 
       ctx2d.save();
       ctx2d.translate(c, c);
