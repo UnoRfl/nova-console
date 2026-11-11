@@ -706,9 +706,9 @@
       </div>
       <div class="toggles">
         <select class="hud" id="modelSel" aria-label="Model">
-          <option value="claude-haiku-4-5-20251001">Haiku &middot; fast</option>
-          <option value="claude-sonnet-5">Sonnet</option>
-          <option value="claude-opus-5">Opus &middot; deep</option>
+          <option value="haiku">Haiku &middot; fast</option>
+          <option value="sonnet">Sonnet</option>
+          <option value="opus">Opus &middot; deep</option>
         </select>
         <button class="hud" id="toggleListen" aria-pressed="false" title="Continuous listening: keep the microphone open"><svg class="ico" aria-hidden="true"><use href="#ic-eq"></use></svg><span class="lbl">Continuous</span></button>
         <button class="hud" id="toggleVoice" aria-pressed="true" title="Voice reply: read answers aloud"><svg class="ico" aria-hidden="true"><use href="#ic-speaker"></use></svg><span class="lbl">Voice reply</span></button>
@@ -1804,10 +1804,52 @@
       .trim();
   }
 
+  // Mark III: the bridge speaks with a local neural voice (Kokoro), so speech
+  // no longer depends on this window or on whatever voices Chrome happens to
+  // have. The request stays open for as long as she is talking; it returns
+  // early, with interrupted=true, when Sir talks over her.
+  async function speakLocal(clean, streamed) {
+    state.localSpeaking = true;
+    setMode("speaking", "Speaking");
+    state.speakEnv = 0.85;
+    const meter = setInterval(async () => {
+      try {
+        const v = await api("/api/voice");
+        if (state.localSpeaking) state.speakEnv = Math.min(1, 0.25 + (v.level || 0) * 5);
+      } catch (e) { /* cosmetic only */ }
+    }, 110);
+    let interrupted = false;
+    try {
+      const r = await api("/api/speak", { method: "POST", body: JSON.stringify({ text: clean, streamed: !!streamed }) });
+      interrupted = !!(r && r.interrupted);
+      if (r && r.error) sysLine("Voice", String(r.error).toUpperCase(), "bad");
+    } catch (e) { /* bridge trouble is reported by the ask path */ }
+    clearInterval(meter);
+    state.localSpeaking = false;
+    state.speakEnv = 0;
+    if (state.busy) return;                 // a new request is already running
+    setMode("idle", state.continuous ? "Listening" : "Standby");
+    if (interrupted) { sysLine("Speech", "INTERRUPTED", "warn"); return; }
+    if (state.continuous) startListening();
+    else beginFollowUp();
+  }
+
+  function stopLocalSpeech() {
+    if (!state.localSpeaking) return;
+    api("/api/stop-speech", { method: "POST", body: "{}" }).catch(() => {});
+  }
+
   function speak(text) {
-    if (!state.voiceOn || !window.speechSynthesis) return false;
+    if (!state.voiceOn) return false;
+    if (state.tts !== "kokoro" && !window.speechSynthesis) return false;
     const clean = speakable(text);
     if (!clean) return false;
+    if (state.tts === "kokoro") {
+      const streamed = !!state.streamedSpeech;
+      state.streamedSpeech = false;
+      speakLocal(clean, streamed);
+      return true;
+    }
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(clean);
     if (state.voice) u.voice = state.voice;
@@ -1852,6 +1894,7 @@
     els.tBridge.textContent = "connected";
     els.tBridge.className = "v good";
     if (h.stt) state.stt = h.stt;
+    if (h.tts) state.tts = h.tts;
     // "windows" records through Windows and transcribes with Whisper, so the
     // honest label names both halves.
     const engines = {
@@ -3949,7 +3992,10 @@
         body: JSON.stringify({
           prompt: prompt,
           model: els.modelSel.value,
-          reset: !!(opts && opts.reset)
+          reset: !!(opts && opts.reset),
+          // Ask the bridge to speak the reply as it streams in, sentence by
+          // sentence, instead of waiting for all of it and speaking it here.
+          speak: !!(state.voiceOn && state.tts === "kokoro")
         })
       });
 
@@ -4043,6 +4089,7 @@
       if (out.denials) sysLine("Tools refused", String(out.denials), "warn");
       scrollLog();
 
+      state.streamedSpeech = !!out.spoken;
       if (!speak(answer)) {
         // Muted replies still get a follow-up window; speak() would have
         // opened one via its onend handler.
@@ -4142,6 +4189,7 @@
     state.voiceOn = !state.voiceOn;
     els.toggleVoice.setAttribute("aria-pressed", String(state.voiceOn));
     if (!state.voiceOn && window.speechSynthesis) speechSynthesis.cancel();
+    if (!state.voiceOn) stopLocalSpeech();
     sysLine("Voice reply", state.voiceOn ? "ENABLED" : "MUTED", state.voiceOn ? "ok" : "warn");
   });
 
@@ -4280,6 +4328,7 @@
   function haltAll() {
     if (state.abort) state.abort.abort();
     if (window.speechSynthesis) speechSynthesis.cancel();
+    stopLocalSpeech();
     clearFollowUp();
     stopListening();
     clearInterval(state.thinkTimer);
@@ -4391,8 +4440,56 @@
       } else if (e.kind === "system" || e.kind === "exit") {
         if (lastAct) lastAct.classList.remove("running");
         lastAct = actLine("sys", e.text, e.detail);
+      } else if (e.kind === "permission") {
+        // She is asking before doing something that cannot easily be undone.
+        if (lastAct) lastAct.classList.remove("running");
+        lastAct = actLine("sys", "Awaiting your yes", e.detail);
+        showApproval(e.detail || e.text);
+      } else if (e.kind === "allowed" || e.kind === "denied") {
+        hideApproval();
+        lastAct = actLine("sys", e.kind === "allowed" ? "Approved" : "Not approved", e.detail);
       }
     }
+  }
+
+  // The approval bar: say "yes" / "no", or click. Silence is a no.
+  function showApproval(detail) {
+    let bar = document.getElementById("novaApproval");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "novaApproval";
+      bar.style.cssText = "position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:9999;" +
+        "max-width:min(720px,92vw);padding:14px 18px;border:1px solid #ffb84d;border-radius:10px;" +
+        "background:rgba(20,10,30,.96);color:#ffe9c7;font:14px/1.45 system-ui,sans-serif;" +
+        "box-shadow:0 0 28px rgba(255,184,77,.35);display:flex;gap:14px;align-items:center";
+      const text = document.createElement("div");
+      text.id = "novaApprovalText";
+      text.style.flex = "1";
+      const mk = (label, allow, colour) => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.style.cssText = "padding:8px 16px;border-radius:7px;border:1px solid " + colour +
+          ";background:transparent;color:" + colour + ";font:600 13px system-ui;cursor:pointer";
+        b.addEventListener("click", () => {
+          api("/api/permission/answer", { method: "POST", body: JSON.stringify({ allow: allow, by: "panel" }) })
+            .catch(() => {});
+          hideApproval();
+        });
+        return b;
+      };
+      bar.append(text, mk("Allow", true, "#7dffb0"), mk("Deny", false, "#ff8a8a"));
+      document.body.appendChild(bar);
+    }
+    document.getElementById("novaApprovalText").textContent =
+      "Nova is asking: " + String(detail || "").replace(/^confirm:\s*/, "") + "  — say yes or no, or choose.";
+    bar.style.display = "flex";
+    clearTimeout(state.approvalTimer);
+    state.approvalTimer = setTimeout(hideApproval, 31000);
+  }
+
+  function hideApproval() {
+    const bar = document.getElementById("novaApproval");
+    if (bar) bar.style.display = "none";
   }
 
   async function pumpActivity() {
@@ -4424,6 +4521,7 @@
         // listener has already matched a wake phrase against its threshold
         // and its decoy list. A cough, the television, a door, someone else
         // talking: none of them get here. That is the whole safety property.
+        stopLocalSpeech();
         if (window.speechSynthesis && speechSynthesis.speaking) {
           speechSynthesis.cancel();
           state.speakEnv = 0;

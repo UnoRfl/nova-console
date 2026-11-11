@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0717">
+<title>Nova</title>
+<style>
+  :root { --bg:#0d0717; --panel:#1a1030; --line:#3a2a66; --text:#ece6ff; --dim:#9b8fc4; --accent:#b48cff; --ok:#39e58c; --warn:#ffb84d; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { padding:14px 16px; display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--line); }
+  header b { letter-spacing:.3em; font-weight:600; }
+  #status { margin-left:auto; font-size:12px; color:var(--dim); }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:86%; padding:10px 13px; border-radius:14px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .me { align-self:flex-end; background:#3b2a78; }
+  .nova { align-self:flex-start; background:var(--panel); border:1px solid var(--line); }
+  .note { align-self:center; font-size:12px; color:var(--dim); text-align:center; }
+  footer { padding:12px 16px 16px; border-top:1px solid var(--line); display:flex; gap:10px; align-items:center; }
+  input { flex:1; min-width:0; padding:12px 14px; border-radius:22px; border:1px solid var(--line);
+    background:var(--panel); color:var(--text); font:inherit; }
+  button { border:0; border-radius:50%; width:48px; height:48px; flex:none; font-size:20px;
+    background:var(--accent); color:#16092e; }
+  #talk.rec { background:var(--ok); animation:pulse 1s infinite; }
+  button:disabled { opacity:.45; }
+  @keyframes pulse { 50% { transform:scale(1.12); } }
+  @media (prefers-reduced-motion: reduce) { #talk.rec { animation:none; } }
+</style>
+</head>
+<body>
+<header><b>NOVA</b><span id="status">connecting…</span></header>
+<div id="log">
+  <div class="note">You are away from the desk, so Nova can look things up and answer,<br>but will not change anything on the PC from here.</div>
+</div>
+<footer>
+  <button id="talk" aria-label="Hold to talk">🎙</button>
+  <input id="text" placeholder="Ask Nova…" autocomplete="off" enterkeyhint="send">
+  <button id="send" aria-label="Send">➤</button>
+</footer>
+<script>
+  const TOKEN = "__NOVA_TOKEN__";
+  const $ = (id) => document.getElementById(id);
+  const log = $("log"), text = $("text"), talk = $("talk"), send = $("send"), status = $("status");
+  let busy = false;
+
+  function add(cls, body) {
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.textContent = body;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+    return d;
+  }
+
+  async function api(path, options) {
+    const o = Object.assign({ headers: {} }, options || {});
+    o.headers["X-Nova-Token"] = TOKEN;
+    const r = await fetch(path, o);
+    return r.json();
+  }
+
+  function speak(t) {
+    if (!window.speechSynthesis) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    const v = speechSynthesis.getVoices().find(v => /en-GB/i.test(v.lang) && /female|libby|sonia|serena|kate|martha/i.test(v.name))
+           || speechSynthesis.getVoices().find(v => /^en/i.test(v.lang));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  }
+
+  async function ask(prompt) {
+    prompt = prompt.trim();
+    if (!prompt || busy) return;
+    busy = true; send.disabled = talk.disabled = true;
+    add("me", prompt);
+    const bubble = add("nova", "…");
+    try {
+      const r = await api("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: prompt, channel: "phone" }) });
+      const answer = r.error ? (r.detail || "Something went wrong.") : (r.text || "(no reply)");
+      bubble.textContent = answer.replace(/::(CAD|MODEL|HOLO|BUILD)[\s\S]*$/, "").trim() || answer;
+      if (!r.error) speak(bubble.textContent);
+    } catch (e) {
+      bubble.textContent = "I could not reach the PC.";
+    }
+    busy = false; send.disabled = talk.disabled = false;
+  }
+
+  send.addEventListener("click", () => { const v = text.value; text.value = ""; ask(v); });
+  text.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); send.click(); } });
+
+  // Hold to talk: record, transcribe on the PC with Whisper, then ask.
+  let rec = null, chunks = [];
+  async function startRec() {
+    if (busy || rec) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      rec = new MediaRecorder(stream);
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        talk.classList.remove("rec");
+        const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+        rec = null;
+        if (blob.size < 2000) return;
+        status.textContent = "transcribing…";
+        try {
+          const r = await fetch("/api/transcribe", { method: "POST", headers: { "X-Nova-Token": TOKEN }, body: blob });
+          const out = await r.json();
+          status.textContent = "ready";
+          if (out.text) ask(out.text);
+        } catch (e) { status.textContent = "could not transcribe"; }
+      };
+      rec.start();
+      talk.classList.add("rec");
+    } catch (e) {
+      add("note", "The microphone is not available here. Type instead.");
+    }
+  }
+  function stopRec() { if (rec && rec.state === "recording") rec.stop(); }
+  talk.addEventListener("pointerdown", (e) => { e.preventDefault(); startRec(); });
+  talk.addEventListener("pointerup", stopRec);
+  talk.addEventListener("pointerleave", stopRec);
+  talk.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  api("/api/health").then(h => {
+    status.textContent = h.error ? "offline" : "ready · " + (h.brain === "local" ? "local brain" : "Claude");
+  }).catch(() => { status.textContent = "offline"; });
+</script>
+</body>
+</html>

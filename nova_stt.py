@@ -36,7 +36,7 @@ _load_error: str | None = None
 def config_model() -> str:
     cfg_path = Path.home() / ".nova" / "config.json"
     try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
         return str(cfg.get("whisper_model") or DEFAULT_MODEL)
     except (OSError, ValueError):
         return DEFAULT_MODEL

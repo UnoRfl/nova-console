@@ -1,4 +1,4 @@
-<#
+﻿<#
     Nova.ps1 -- one place to run, inspect and install NOVA.
 
         .\Nova.ps1 status      what is running right now
@@ -20,7 +20,7 @@
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status','start','stop','restart','open','wake','mic','audio','test','dictate','logs','login','install','uninstall','model')]
+    [ValidateSet('status','start','stop','restart','open','wake','mic','audio','test','dictate','logs','login','install','uninstall','model','orb')]
     [string]$Command = 'status',
 
     # Second positional, used only by 'model' so far: haiku | sonnet | opus.
@@ -46,6 +46,11 @@ $TaskWake   = 'Nova-Wake'
 
 function Get-Python {
     # pythonw runs without a console window, which is what we want for a daemon.
+    # Nova's own environment first: that is where its packages live.
+    foreach ($n in @('pythonw.exe','python.exe')) {
+        $v = Join-Path $PSScriptRoot "venv\Scripts\$n"
+        if (Test-Path $v) { return $v }
+    }
     foreach ($n in @('pythonw','python')) {
         $c = Get-Command $n -ErrorAction SilentlyContinue
         if ($c) { return $c.Source }
@@ -125,7 +130,7 @@ function Invoke-Status {
             $tok = Get-NovaToken
             $h = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -Headers @{ 'X-Nova-Token' = $tok } -TimeoutSec 5
             Write-Host "  claude      $($h.status)  [$($h.model)]"
-            Write-Host "  power       $($h.power)$(if ($h.power -eq 'full') { '   <-- can run commands on this PC' } else { '   (read-only)' })"
+            Write-Host "  power       $($h.power)$(if ($h.power -eq 'full') { '   (everything available; risky actions ask first)' } else { '   (read-only)' })"
             if ($h.status -ne 'ready' -and $h.detail) {
                 Write-Host ''
                 Write-Host "  $($h.detail)" -ForegroundColor Yellow
@@ -170,11 +175,29 @@ function Invoke-Start {
     if (Get-TrackedProcess $WakePid) {
         Write-Host 'wake listener already running'
     } else {
-        $p = Start-Process -FilePath 'powershell.exe' `
-            -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',"`"$WakePs1`"") `
-            -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+        # Mark III ears: VAD + voice match + Whisper, in Nova's own Python.
+        # The old Windows-recogniser listener (nova-wake.ps1) is kept on disk
+        # as a fallback only if the new one is missing.
+        $EarsPy = Join-Path $Root 'nova_ears.py'
+        if ((Test-Path $EarsPy) -and ($py -like '*\venv\*')) {
+            $p = Start-Process -FilePath $py -ArgumentList @("`"$EarsPy`"") `
+                -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+        } else {
+            $p = Start-Process -FilePath 'powershell.exe' `
+                -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',"`"$WakePs1`"") `
+                -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+        }
         Set-Content -Path $WakePid -Value $p.Id -Encoding utf8
-        Write-Host "started  wake listener (pid $($p.Id)) -- say `"Nova`""
+        Write-Host "started  wake listener (pid $($p.Id)) -- say `"Hey Nova`""
+    }
+
+    # The orb: her presence on screen, so the full panel need not be open.
+    $OrbPy  = Join-Path $Root 'nova_orb.py'
+    $OrbPid = Join-Path $Root 'orb.pid'
+    if ((Test-Path $OrbPy) -and ($py -like '*\venv\*') -and -not (Get-TrackedProcess $OrbPid)) {
+        $p = Start-Process -FilePath $py -ArgumentList @("`"$OrbPy`"") -WorkingDirectory $Root -PassThru
+        Set-Content -Path $OrbPid -Value $p.Id -Encoding utf8
+        Write-Host "started  orb (pid $($p.Id))"
     }
 
     # The watchdog goes up last, once there is something to watch. It calls
@@ -197,6 +220,7 @@ function Invoke-Stop {
     Stop-Tracked $WatchPid  'watchdog'
     Stop-Tracked $WakePid   'wake listener'
     Stop-Tracked $BridgePid 'bridge'
+    Stop-Tracked (Join-Path $Root 'orb.pid') 'orb'
     $panel = Join-Path $Root 'panel.pid'
     if (Test-Path $panel) { Remove-Item $panel -Force -ErrorAction SilentlyContinue }
 }
@@ -206,11 +230,11 @@ function Invoke-Model {
 
     # Short names, because this is meant to be said out loud as much as typed.
     $map = @{
-        'haiku'  = 'claude-haiku-4-5-20251001'
-        'fast'   = 'claude-haiku-4-5-20251001'
-        'sonnet' = 'claude-sonnet-5'
-        'opus'   = 'claude-opus-5'
-        'deep'   = 'claude-opus-5'
+        'haiku'  = 'haiku'
+        'fast'   = 'haiku'
+        'sonnet' = 'sonnet'
+        'opus'   = 'opus'
+        'deep'   = 'opus'
     }
     $key = $Want.Trim().ToLower()
     if (-not $key) { Write-Host 'Which model? haiku, sonnet or opus.' -ForegroundColor Yellow; return }
@@ -327,6 +351,30 @@ switch ($Command) {
     'stop'      { Invoke-Stop }
     'restart'   { Invoke-Stop; Start-Sleep -Milliseconds 700; Invoke-Start; Invoke-Status }
     'model'     { Invoke-Model $Arg }
+    'orb'       {
+                  # The orb re-reads orb.json while it runs, so this takes
+                  # effect within a second and needs no restart.
+                  #   hide    fade out; she comes back whenever she is called
+                  #   show    stay on screen
+                  #   toggle  flip between those two
+                  #   lock / unlock   whether it can be dragged
+                  $file = Join-Path $Root 'orb.json'
+                  $o = @{}
+                  if (Test-Path $file) {
+                      try { (Get-Content $file -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $o[$_.Name] = $_.Value } } catch { }
+                  }
+                  switch ($Arg) {
+                      'hide'   { $o['hidden'] = $true }
+                      'show'   { $o['hidden'] = $false }
+                      'toggle' { $o['hidden'] = -not [bool]$o['hidden'] }
+                      'lock'   { $o['locked'] = $true }
+                      'unlock' { $o['locked'] = $false }
+                      default  { Write-Host 'usage: .\Nova.ps1 orb hide | show | toggle | lock | unlock' }
+                  }
+                  # WriteAllText, not Set-Content: PowerShell 5.1 would add a BOM.
+                  [IO.File]::WriteAllText($file, ($o | ConvertTo-Json -Compress))
+                  Write-Host ("orb: locked={0} auto-hide={1}" -f [bool]$o['locked'], [bool]$o['hidden'])
+                }
     'open'      { if (Show-NovaPanel) { Write-Host 'panel opened' } }
     'wake'      { [void](Send-NovaWake -Phrase 'nova'); [void](Show-NovaPanel); Write-Host 'wake signalled -- the panel should chime and start recording' }
     'mic'       {
