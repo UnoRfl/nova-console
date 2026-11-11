@@ -706,6 +706,7 @@
       </div>
       <div class="toggles">
         <select class="hud" id="modelSel" aria-label="Model">
+          <option value="auto" title="Picks the cheapest brain that can handle each request: local for chat, Haiku for normal, Sonnet for hard, Opus only when asked to think hard, Codex when Claude is unavailable">Auto &middot; by difficulty</option>
           <option value="haiku">Haiku &middot; fast</option>
           <option value="sonnet">Sonnet</option>
           <option value="opus">Opus &middot; deep</option>
@@ -4016,6 +4017,12 @@
         }
         chime(false);
         return;
+      }
+
+      if (out.route) {
+        // Which brain the router picked for this request, and why.
+        sysLine("Route", (out.route.tier + " → " + out.route.engine).toUpperCase(), "ok");
+        els.tModel.textContent = "auto: " + out.route.engine;
       }
 
       const full = (out.text || "").trim();

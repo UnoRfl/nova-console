@@ -230,6 +230,7 @@ function Invoke-Model {
 
     # Short names, because this is meant to be said out loud as much as typed.
     $map = @{
+        'auto'   = 'auto'
         'haiku'  = 'haiku'
         'fast'   = 'haiku'
         'sonnet' = 'sonnet'
@@ -237,9 +238,9 @@ function Invoke-Model {
         'deep'   = 'opus'
     }
     $key = $Want.Trim().ToLower()
-    if (-not $key) { Write-Host 'Which model? haiku, sonnet or opus.' -ForegroundColor Yellow; return }
+    if (-not $key) { Write-Host 'Which model? auto, haiku, sonnet or opus.' -ForegroundColor Yellow; return }
     if (-not $map.ContainsKey($key)) {
-        Write-Host "Unknown model '$Want'. Use haiku, sonnet or opus." -ForegroundColor Red
+        Write-Host "Unknown model '$Want'. Use auto, haiku, sonnet or opus." -ForegroundColor Red
         return
     }
     if (-not (Test-Port $Port)) { Write-Host 'The bridge is not running.' -ForegroundColor Red; return }

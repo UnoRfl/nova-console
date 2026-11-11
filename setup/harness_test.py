@@ -79,7 +79,7 @@ try:
     first_sound = None
     import threading
     result = {}
-    th = threading.Thread(target=lambda: result.update(api("/api/ask", {"prompt": "hello there", "speak": True})))
+    th = threading.Thread(target=lambda: result.update(api("/api/ask", {"model": "haiku", "prompt": "hello there", "speak": True})))
     th.start()
     while th.is_alive():
         if first_sound is None and api("/api/voice")["speaking"]:
@@ -95,13 +95,13 @@ try:
           f"first audio {spoke.get('first_audio_s')}s, full reply {reply_done:.2f}s")
 
     # 2. a projector block is delivered but not spoken
-    r = api("/api/ask", {"prompt": "show me a shape", "speak": True})
+    r = api("/api/ask", {"model": "haiku", "prompt": "show me a shape", "speak": True})
     spoke = api("/api/speak", {"text": r["text"], "streamed": True}, timeout=120)
     check("block reaches the panel", "::CAD" in r["text"])
     check("only the prose was spoken", spoke.get("spoken") == 1, str(spoke))
 
     # 3. memory marker: stored, stripped, not spoken
-    r = api("/api/ask", {"prompt": "my favourite test colour", "speak": True})
+    r = api("/api/ask", {"model": "haiku", "prompt": "my favourite test colour", "speak": True})
     spoke = api("/api/speak", {"text": r["text"], "streamed": True}, timeout=120)
     check("marker stripped and stored", "[[" not in r["text"] and r.get("remembered"), str(r.get("remembered")))
     check("marker not spoken", spoke.get("spoken") == 2, str(spoke))
@@ -109,12 +109,12 @@ try:
     nova_memory.forget_matching("favourite test colour teal")
 
     # 4. a tool turn gets an acknowledgement first
-    r = api("/api/ask", {"prompt": "use a tool to check the pc", "speak": True})
+    r = api("/api/ask", {"model": "haiku", "prompt": "use a tool to check the pc", "speak": True})
     spoke = api("/api/speak", {"text": r["text"], "streamed": True}, timeout=120)
     check("tool turn: acknowledgement + answer spoken", spoke.get("spoken") == 3, str(spoke))
 
     # 5. speak:false means silence
-    r = api("/api/ask", {"prompt": "hello again", "speak": False})
+    r = api("/api/ask", {"model": "haiku", "prompt": "hello again", "speak": False})
     check("muted turn is not spoken", r.get("spoken") is False)
 
     # 6. usage and jobs

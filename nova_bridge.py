@@ -39,6 +39,7 @@ import nova_memory  # noqa: E402
 import nova_harness  # noqa: E402
 import nova_events  # noqa: E402
 import nova_presence  # noqa: E402
+import nova_router  # noqa: E402
 
 try:                        # Nova's own voice. Optional: without it the HUD
     import nova_voice       # falls back to the browser's speech synthesis.
@@ -470,6 +471,27 @@ chat, banter, jokes, opinions, explanations and general knowledge are all welcom
 answer those properly and with some charm. Reminders, routines such as "game mode", and "remember that ..." are
 handled for you before a request reaches you, so you need not handle those."""
 
+# When the router hands the local model the light conversation on purpose,
+# Claude is fine -- it just is not needed for this.
+ROUTED_LOCAL_BRIEF = """You are NOVA, the assistant of the man whose PC you run on. Address him as
+"Sir". You are composed, warm, quietly witty, and brief: one to three short sentences,
+in plain spoken prose with no markdown, lists, emoji or code.
+
+You are the light-conversation side of Nova, running on a small model on his own PC to
+save his allowance: chat, banter, jokes, opinions, explanations and general knowledge.
+Requests that need you to check or do something are sent to your bigger engines
+automatically, so you will rarely see them. If one does reach you, do not pretend: say
+in one sentence that he should ask again starting with "use haiku" and you will handle
+it properly. Never invent a result, a status, a time or a number about his computer or
+the outside world."""
+
+CODEX_BRIEF = """You are NOVA, the voice assistant of the man whose PC you run on, answering
+through the Codex engine. Address him as "Sir". Your reply is read aloud: one to three
+short sentences unless he asks for more, plain prose, no markdown, lists, code blocks or
+emoji. You may read files and run read-only commands to find an answer, but you must not
+change anything on this machine; if a change is needed, say what you would do and that
+he should ask for it as a job. Never invent a result."""
+
 
 GUEST_BRIEF = """You are NOVA, an assistant answering in a public chat on behalf of the
 server's owner. Be friendly, brief and helpful: one to three sentences, plain text.
@@ -873,6 +895,16 @@ class Backend:
         self.saw_partials = False
         self.acked = False
         self.turn_began = 0.0
+        # Routing by difficulty (owner only). One Claude process per model, so
+        # moving between Haiku and Sonnet does not pay a respawn every time.
+        self.router = nova_router.Router(cfg)
+        self.workers: dict[str, "Backend"] = {}
+        self.recent: list[dict] = []        # last exchanges, whichever engine answered
+        self.turn_no = 0
+        self.seen_upto = 0                  # as a worker: last turn this process saw
+        self.last_used = 0.0
+        self.over_budget = lambda: False    # set by main() once usage exists
+        self.last_route: dict = {}
 
     # ---------------------------------------------------------- process
     def spawn(self) -> bool:
@@ -986,7 +1018,7 @@ class Backend:
         if CLAUDE is None:
             self.status, self.detail = "missing", "claude.exe was not found on this machine."
             return self.info()
-        out = self.ask("Reply with the single word: ready", None, False, timeout=90)
+        out = self.ask_fixed("Reply with the single word: ready", None, False, timeout=90)
         if "error" not in out and self.brain == "claude":
             self.status, self.detail = "ready", "Claude CLI responded."
         return self.info()
@@ -996,7 +1028,9 @@ class Backend:
             "backend": "cli",
             "status": self.status,
             "detail": self.detail,
-            "model": self.model,
+            "model": "auto" if self.routable(None) else self.model,
+            "pinned_model": self.model,
+            "route": self.last_route,
             "power": self.cfg.get("power", "read"),
             "stt": self.cfg.get("stt", "browser"),
             "brain": self.brain,
@@ -1027,8 +1061,173 @@ class Backend:
             log(f"model switched to {model}")
             return self.info()
 
+    # ---------------------------------------------------------- routing
+    def routable(self, model: str | None) -> bool:
+        """Route by difficulty: owner channel, routing on, no model forced for this turn."""
+        return (model in (None, "", "auto") and self.cfg.get("channel") in (None, "owner")
+                and self.cfg.get("brain") != "local" and self.router.enabled())
+
+    def busy(self) -> bool:
+        return self.lock.locked() or any(w.lock.locked() for w in self.workers.values())
+
+    def worker(self, model: str) -> "Backend":
+        """The Claude process for a model: this one for its own model, else a pooled one."""
+        if model == self.model:
+            return self
+        w = self.workers.get(model)
+        if w is None:
+            wcfg = dict(self.cfg)
+            wcfg["model"] = model
+            w = Backend(wcfg, self.activity)
+            self.workers[model] = w
+        return w
+
+    def reap_workers(self, idle: float = 600) -> None:
+        """An idle pooled process costs memory, not tokens; let it go after ten minutes."""
+        for w in self.workers.values():
+            if w.alive() and not w.lock.locked() and time.time() - w.last_used > idle:
+                w.kill()
+                log(f"stopped idle {w.model} process")
+
+    def context_for(self, key: str, since: int, limit: int = 6) -> str:
+        """What was said with OTHER engines since this one last took part."""
+        missed = [x for x in self.recent if x["n"] > since and x["engine"] != key][-limit:]
+        if not missed:
+            return ""
+        lines = []
+        for x in missed:
+            lines.append("Sir: " + x["user"][:400])
+            lines.append("You: " + x["reply"][:400])
+        return ("(Context: earlier in this conversation, answered by another of your engines.\n"
+                + "\n".join(lines) + ")\n\n")
+
+    def record(self, prompt: str, reply: str, key: str) -> None:
+        self.turn_no += 1
+        self.recent.append({"n": self.turn_no, "user": prompt, "reply": reply, "engine": key})
+        self.recent = self.recent[-16:]
+
+    def codex_ready(self) -> bool:
+        return bool(nova_harness.codex_exe()) and (HOME / ".codex" / "auth.json").is_file()
+
     def ask(self, prompt: str, model: str | None, reset: bool,
-            timeout: int | None = None, speak: bool = False) -> dict:
+            timeout: int | None = None, speak: bool = False, route_text: str | None = None) -> dict:
+        """Answer with the cheapest engine that can handle this request.
+
+        route_text is what he actually said, when prompt carries recalled
+        memories as well; the difficulty is judged on his words alone.
+
+        The router gives the request a tier (chat / normal / hard / expert /
+        code), the tier gives an ordered list of engines, and the first one
+        that runs answers. A forced model, another channel, or routing turned
+        off goes straight to ask_fixed, the old single-model path.
+        """
+        if not self.routable(model):
+            return self.ask_fixed(prompt, None if model == "auto" else model, reset, timeout, speak)
+        if reset:
+            self.recent, self.local_history = [], []
+            for w in [self, *self.workers.values()]:
+                w.kill()
+                w.session = None
+        self.reap_workers()
+
+        local = nova_harness.local_model()
+        tier, how = self.router.tier(route_text or prompt, local)
+        claude_ok = (CLAUDE is not None and time.time() >= self.claude_down_until
+                     and not self.over_budget())
+        plan = self.router.plan(tier, claude_ok, self.codex_ready(), bool(local))
+        if not plan:
+            return getattr(self, "claude_error", None) or {
+                "error": "no_backend", "detail": "No engine is available: Claude, Codex and the local model are all down."}
+
+        out: dict = {}
+        for engine, arg in plan:
+            key = engine if engine != "claude" else f"claude:{arg}"
+            self.activity.push("system", "Route", f"{tier} ({how}) -> {key}")
+            log(f"route: {tier} by {how} -> {key}")
+            if engine == "claude":
+                w = self.worker(arg)
+                note = self.context_for(key, w.seen_upto)
+                out = w.ask_claude(note + prompt, arg, False, timeout, speak)
+                w.last_used = time.time()
+                if out.get("error") in ("unauthenticated", "no_backend", "spawn_failed"):
+                    self.claude_down_until = time.time() + 600
+                    self.claude_error = out
+                    self.status, self.detail = w.status, w.detail
+                    continue
+                if "error" not in out:
+                    w.seen_upto = self.turn_no + 1
+                    self.status = "ready"
+            elif engine == "codex":
+                out = self.ask_codex(self.context_for(key, 0, limit=4) + prompt, arg, timeout, speak)
+            else:
+                # The local model gets the shared conversation as its history.
+                self.local_history = [m for x in self.recent[-6:] for m in
+                                      ({"role": "user", "content": x["user"][:600]},
+                                       {"role": "assistant", "content": x["reply"][:600]})]
+                out = self.ask_local(prompt, local, speak, routed=claude_ok)
+            if "error" in out:
+                continue
+            self.brain = engine
+            self.router.remember("hard" if tier == "codex" else tier)
+            self.record(route_text or prompt, out.get("text", ""), key)
+            self.last_route = {"tier": tier, "how": how, "engine": key}
+            out["route"] = self.last_route
+            out["engine"] = engine
+            return out
+        return out
+
+    def ask_codex(self, prompt: str, effort: str, timeout: int | None, speak: bool) -> dict:
+        """One answer from Codex (ChatGPT subscription), read-only, nothing kept on disk."""
+        exe = nova_harness.codex_exe()
+        if not exe:
+            return {"error": "no_backend", "detail": "Codex is not installed."}
+        with self.lock:
+            began = time.time()
+            self.activity.push("thinking", "Codex thinking")
+            out_file = ROOT / "logs" / "codex-last.txt"
+            out_file.parent.mkdir(exist_ok=True)
+            try:
+                out_file.unlink()
+            except OSError:
+                pass
+            cmd = exe + ["exec", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+                         "-s", "read-only", "-C", self.cfg["workdir"],
+                         "-c", f'model_reasoning_effort="{effort}"',
+                         "-o", str(out_file), CODEX_BRIEF + "\n\nRequest: " + prompt]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", timeout=timeout or self.cfg.get("max_seconds", 180),
+                                      cwd=self.cfg["workdir"], stdin=subprocess.DEVNULL,
+                                      creationflags=NO_WINDOW, env=nova_harness.clean_env())
+            except subprocess.TimeoutExpired:
+                return {"error": "timeout", "detail": "Codex took too long to answer."}
+            except OSError as exc:
+                return {"error": "spawn_failed", "detail": f"could not start Codex: {exc}"}
+            try:
+                text = out_file.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                text = ""
+            if proc.returncode != 0 or not text:
+                tail = (proc.stderr or proc.stdout or "")[-300:]
+                log(f"codex failed ({proc.returncode}): {tail}")
+                return {"error": "codex_error", "detail": tail or "Codex said nothing."}
+            text, remembered = REMEMBER_PATTERN.sub("", text).strip(), []
+            spoken = False
+            if speak and nova_voice and not nova_voice.shared().error:
+                stream = nova_voice.shared().open_stream()
+                streamer = nova_harness.SentenceStreamer(stream.feed)
+                streamer.push(text)
+                streamer.flush()
+                spoken = streamer.count > 0
+                stream.close()
+            self.status = "ready"
+            self.activity.push("text", text[:400])
+            return {"text": text, "ms": int((time.time() - began) * 1000), "turns": 1, "denials": 0,
+                    "remembered": remembered, "memories": len(load_memories(limit=10_000)),
+                    "session": "codex", "spoken": spoken, "cost": 0.0, "engine": "codex"}
+
+    def ask_fixed(self, prompt: str, model: str | None, reset: bool,
+                  timeout: int | None = None, speak: bool = False) -> dict:
         """Answer with Claude; fall back to the local model when Claude cannot.
 
         "Cannot" means not signed in, not installed, or failing to start. The
@@ -1050,7 +1249,7 @@ class Backend:
                 "error": "no_backend", "detail": "Neither Claude nor a local model is available."}
         return self.ask_local(prompt, local, speak)
 
-    def ask_local(self, prompt: str, model: str, speak: bool) -> dict:
+    def ask_local(self, prompt: str, model: str, speak: bool, routed: bool = False) -> dict:
         public = self.cfg.get("channel") == "public"
         with self.lock:
             began = time.time()
@@ -1063,7 +1262,7 @@ class Backend:
                 system = GUEST_BRIEF + ("\n\nRight now you cannot look anything up at all, "
                                         "not even the Minecraft server. Say so if asked.")
             else:
-                system = LOCAL_BRIEF + "\n\nWhat you know about him:\n" + "\n".join(
+                system = (ROUTED_LOCAL_BRIEF if routed else LOCAL_BRIEF) + "\n\nWhat you know about him:\n" + "\n".join(
                     f"- {m}" for m in load_memories(limit=12))
             self.local_history.append({"role": "user", "content": prompt})
             self.local_history = self.local_history[-12:]
@@ -1088,7 +1287,8 @@ class Backend:
             self.local_history.append({"role": "assistant", "content": text})
             self.brain = "local"
             self.status = "ready"
-            self.detail = f"Answering with the local model ({model}) until Claude is signed in."
+            self.detail = (f"Light chat on the local model ({model}); harder requests go to Claude."
+                           if routed else f"Answering with the local model ({model}) until Claude is signed in.")
             # Markers are stripped, never stored, on the local path: a small
             # model cannot be trusted to decide what is worth remembering.
             text, remembered = REMEMBER_PATTERN.sub("", text).strip(), []
@@ -1746,12 +1946,25 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/model":
-            want = (body.get("model") or "").strip()
+            want = (body.get("model") or "").strip().lower()
+            cfg = self.server.backend.cfg
+            routing = cfg.get("routing") if isinstance(cfg.get("routing"), dict) else {}
+            if want == "auto":
+                # Pick the brain per request by difficulty.
+                routing["enabled"] = True
+                cfg["routing"] = routing
+                save_config(cfg)
+                log("model: auto (routing by difficulty)")
+                self.server.activity.push("system", "Model set to auto")
+                self.send_json(self.server.backend.info())
+                return
             want = model_alias(want) if want else want
             if want not in MODELS:
                 self.send_json({"error": "bad_model", "detail": "Unknown model."}, 400)
                 return
-            cfg = self.server.backend.cfg
+            # Picking a model by name pins it: every request uses it until "auto".
+            routing["enabled"] = False
+            cfg["routing"] = routing
             cfg["model"] = want
             save_config(cfg)
             self.send_json(self.server.backend.set_model(want))
@@ -1864,10 +2077,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.server.guest("remote").ask(asked, None, bool(body.get("reset")))
             else:
                 result = self.server.backend.ask(asked, body.get("model"), bool(body.get("reset")),
-                                                 speak=bool(body.get("speak")))
+                                                 speak=bool(body.get("speak")), route_text=prompt)
             if "error" not in result:
                 nova_memory.log_exchange(prompt, result.get("text", ""))
-                warn = self.server.usage.add("claude", result.get("cost", 0))
+                warn = self.server.usage.add(result.get("engine") or "claude", result.get("cost", 0))
                 if warn:
                     log(warn)
                     self.server.activity.push("system", "Budget", warn)
@@ -2021,6 +2234,7 @@ def main() -> int:
     httpd.wake = Signal()
     httpd.listen = Signal(ttl=12)   # a stale "listen again" must not linger
     httpd.usage = nova_harness.Usage(cfg)
+    backend.over_budget = lambda: httpd.usage.over("claude")
     httpd.permissions = Permissions(activity)
     guests: dict[str, Backend] = {}
 
@@ -2042,7 +2256,7 @@ def main() -> int:
             return "approval"
         if voice and voice.speaking:
             return "speaking"
-        if backend.lock.locked():
+        if backend.busy():
             return "thinking"
         if time.time() - httpd.last_wake < 8:
             return "listening"
@@ -2065,7 +2279,7 @@ def main() -> int:
         def work():
             voice = nova_voice.shared()
             for _ in range(240):                      # wait up to a minute for quiet
-                if not voice.speaking and not backend.lock.locked():
+                if not voice.speaking and not backend.busy():
                     break
                 time.sleep(0.25)
             voice.earcon("done")
@@ -2106,7 +2320,7 @@ def main() -> int:
                 log(f"self-request failed: {result['error']}")
             else:
                 activity.push("text", result.get("text", "")[:400])
-                httpd.usage.add("claude", result.get("cost", 0))
+                httpd.usage.add(result.get("engine") or "claude", result.get("cost", 0))
         threading.Thread(target=work, daemon=True).start()
 
     httpd.speak_now = speak_now
