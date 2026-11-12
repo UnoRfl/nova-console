@@ -188,6 +188,89 @@ def classify(tool: str, params: dict | None = None) -> dict:
     return out("confirm", "unrecognised tool")
 
 
+# ------------------------------------------------------------- trust ladder
+# Only matters when ask_first is on. Each kind of action Sir has said yes to
+# is counted; after TRUST_AFTER yeses with no refusal in between, she stops
+# asking for that kind. One "no" puts it back to asking. Anything destructive
+# is never learned: it is asked every time, however often he has agreed.
+
+TRUST_FILE = ROOT / "trust.json"
+TRUST_AFTER = 3
+
+NEVER_LEARN = re.compile(
+    r"\b(?:rm|rmdir|del|erase|rd|remove-item|clear-content|format|mkfs|dd|diskpart|bcdedit|cipher|"
+    r"shutdown|restart-computer|stop-computer|taskkill|stop-process|kill|reg|regedit|netsh|schtasks|"
+    r"set-executionpolicy|invoke-expression|iex|msiexec|"
+    r"git\s+(?:push|reset|clean|rebase|rm|stash\s+(?:drop|clear))|"
+    r"gh\s+(?:pr\s+(?:merge|close)|repo\s+delete|release))\b|\|\s*(?:sh|bash|powershell|pwsh|cmd)\b",
+    re.IGNORECASE)
+NEVER_LEARN_TOOLS = {"forget", "lock_pc", "sleep_pc", "minecraft_stop", "minecraft_restart",
+                     "close_window", "save_routine"}
+
+
+def signature(tool: str, params: dict | None = None) -> str:
+    """A name for the KIND of action, or '' if this kind must always be asked.
+
+    Deliberately coarse for shell commands (the program and its subcommand,
+    never the arguments) and by folder for file edits, so "git commit" is one
+    thing he can come to trust and "git push" a different one.
+    """
+    params = params if isinstance(params, dict) else {}
+    if tool == "Bash":
+        cmd = str(params.get("command", "")).strip()
+        if not cmd or NEVER_LEARN.search(cmd) or NEVER_SHELL.search(cmd) or re.search(r"&&|\|\||;|\||>", cmd):
+            return ""
+        words = re.findall(r"[A-Za-z][\w.-]*", cmd)[:2]
+        if not words:
+            return ""
+        head = Path(words[0]).stem.lower()
+        sub = words[1].lower() if len(words) > 1 and head in (
+            "git", "gh", "npm", "pip", "python", "py", "node", "winget", "docker", "ssh", "cargo", "uv") else ""
+        return f"Bash:{head}{' ' + sub if sub else ''}"
+    if tool in EDIT_TOOLS:
+        path = str(params.get("file_path") or params.get("notebook_path") or "")
+        if not path or SENSITIVE.search(path) or NEVER_PATH.search(path):
+            return ""
+        try:
+            return f"{tool}:{str(Path(path).resolve().parent).lower()}"
+        except (OSError, ValueError):
+            return ""
+    if tool.startswith("mcp__nova__"):
+        name = tool.split("__")[-1]
+        return "" if name in NEVER_LEARN_TOOLS else f"nova:{name}"
+    return ""
+
+
+def _trust() -> dict:
+    try:
+        t = json.loads(TRUST_FILE.read_text(encoding="utf-8"))
+        return t if isinstance(t, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def trusted(tool: str, params: dict | None = None) -> bool:
+    sig = signature(tool, params)
+    return bool(sig) and int(_trust().get(sig, {}).get("yes", 0)) >= TRUST_AFTER
+
+
+def learn(tool: str, params: dict | None, allowed: bool) -> str:
+    """Record his answer. Returns the signature if this yes just earned trust."""
+    sig = signature(tool, params)
+    if not sig:
+        return ""
+    table = _trust()
+    entry = table.get(sig) or {"yes": 0}
+    before = int(entry.get("yes", 0))
+    entry["yes"] = before + 1 if allowed else 0
+    table[sig] = entry
+    try:
+        TRUST_FILE.write_text(json.dumps(table, indent=1), encoding="utf-8")
+    except OSError:
+        return ""
+    return sig if allowed and before + 1 == TRUST_AFTER else ""
+
+
 # What counts as a spoken yes or no while she is waiting for an answer.
 # A yes is ONLY affirmations, start to finish ("yes", "yes, go ahead", "okay do
 # it please"). Anything with other words in it is not a yes -- "yes but first

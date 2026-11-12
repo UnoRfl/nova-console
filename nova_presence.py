@@ -33,7 +33,7 @@ COLOURS = {"listening": "#39e58c", "thinking": "#ff4fd8", "speaking": "#9a6bff",
 
 
 def cfg() -> dict:
-    out = {"rgb": True, "pocket": True}
+    out = {"rgb": True, "pocket": True, "discord": True}
     try:
         raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
         out.update({k: bool(v) for k, v in (raw.get("presence") or {}).items() if k in out})

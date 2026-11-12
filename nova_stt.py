@@ -90,8 +90,21 @@ def transcribe(data: bytes) -> dict:
 
     began = time.time()
     try:
+        # Decode here rather than hand faster-whisper the bytes: its own
+        # decoder calls av.open(metadata_errors=...), which newer PyAV builds
+        # dropped, and that failed every clip with a TypeError.
+        import av
+        import numpy as np
+        chunks = []
+        with av.open(io.BytesIO(data)) as box:
+            resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
+            for frame in box.decode(audio=0):
+                chunks += [f.to_ndarray().reshape(-1) for f in resampler.resample(frame)]
+            chunks += [f.to_ndarray().reshape(-1) for f in resampler.resample(None)]
+        if not chunks:
+            return {"error": "empty_audio", "detail": "No audio could be decoded."}
         segments, info = model.transcribe(
-            io.BytesIO(data),
+            np.concatenate(chunks).astype(np.float32),
             language="en",
             # Greedy decoding. For short spoken commands it is roughly twice as
             # fast as a beam search and the wording comes out the same.

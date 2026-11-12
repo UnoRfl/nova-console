@@ -173,6 +173,34 @@ def day(date: str) -> list[str]:
     return [f"{r['at'][11:16]}  {r['text']}" for r in rows]
 
 
+def loops() -> list[dict]:
+    """Things left unfinished, oldest first."""
+    with _lock, connect() as db:
+        rows = db.execute("SELECT id, text, topic, at FROM memory WHERE kind='loop' ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def close_loop(query: str) -> list[str]:
+    """Close the open loop that best matches. The closure goes in the day log."""
+    hits = search(query, limit=1, kinds=("loop",))
+    if not hits:
+        low = " ".join(query.lower().split())
+        hits = [l for l in loops() if low and (low in l["text"].lower() or l["text"].lower() in low)][:1]
+    if not hits:
+        return []
+    forget(hits[0]["id"])
+    add(f"Finished: {hits[0]['text']}", kind="day", source="log", topic=time.strftime("%Y-%m-%d"))
+    return [hits[0]["text"]]
+
+
+def trail(query: str, days: int = 21, limit: int = 8) -> list[str]:
+    """The most recent diary lines about a subject, for "where did we leave off"."""
+    since = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * 86400))
+    hits = [h for h in search(query, limit=40, kinds=("day",)) if h["topic"] >= since]
+    hits.sort(key=lambda h: h["id"])
+    return [f"{h['at'][:16]}  {h['text']}" for h in hits[-limit:]]
+
+
 def count(kind: str | None = None) -> int:
     with _lock, connect() as db:
         if kind:
@@ -182,19 +210,31 @@ def count(kind: str | None = None) -> int:
 
 def recall_block(prompt: str, limit: int = 5, budget: int = 1400) -> str:
     """What to whisper to her alongside a question: the memories that bear on it."""
-    hits = search(prompt, limit=limit)
+    hits = search(prompt, limit=limit, kinds=("fact", "project", "loop"))
     low = prompt.lower()
     extra: list[str] = []
     if re.search(r"\byesterday\b", low):
         extra = day(time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400)))[-12:]
     elif re.search(r"\b(today|earlier|this morning|just now)\b", low):
         extra = day(time.strftime("%Y-%m-%d"))[-12:]
+    if re.search(r"\b(leave off|left off|leaving off|pick(?:ing)? (?:it |this |that )?(?:back )?up|where were we|"
+                 r"last time|what was i (?:doing|working on)|still (?:open|pending|unfinished|to do)|"
+                 r"open loops?|unfinished|catch me up)\b", low):
+        # "Where did we leave off on the deck?" -- the diary lines about the
+        # subject, and whatever is still marked open.
+        subject = re.sub(r"\b(leave|left|leaving|off|pick(?:ing)?|back|up|where|were|we|last|time|what|was|"
+                         r"doing|working|still|open|pending|unfinished|loops?|catch|did|with|on)\b", " ", low)
+        extra += [t for t in trail(subject) if t not in extra]
+        open_now = [l for l in loops() if l["id"] not in {h["id"] for h in hits}]
+        hits += [dict(l, kind="loop") for l in open_now[-6:]]
     if not hits and not extra:
         return ""
     lines, used = [], 0
     for h in hits:
         t = h["text"] if len(h["text"]) <= 420 else h["text"][:420] + "..."
         tag = f"[{h['topic']}] " if h["kind"] == "project" and h["topic"] else ""
+        if h["kind"] == "loop":
+            tag = f"(still open, from {h.get('at', '')[:10]}) "
         if used + len(t) > budget:
             break
         lines.append(f"- {tag}{t}")

@@ -166,6 +166,37 @@ switch her own model, and shut herself down — each through a tested helper
 script rather than improvised shell. See [`nova.tools.md`](nova.tools.md),
 which is the document she herself reads.
 
+**She speaks first.** `nova_initiative.py` is the part that notices things:
+
+- *Watchers.* The Minecraft server, its panel and tunnel on a second PC (and
+  whether that PC answers at all, with flapping called out as flapping), a
+  full disk, a hot graphics card, background jobs, and pull requests on the
+  repos listed under `events.watch_prs`.
+- *Standing orders.* "Keep an eye on the render and tell me when it's done"
+  becomes a `keep_watch` order she checks on a timer with read-only hands,
+  and she speaks only when something changes.
+- *Presence.* Keyboard and mouse idle time (no camera) tells her when you
+  have stepped away. Anything not urgent waits and is delivered in one
+  breath when you are back; anything urgent is also dropped in
+  `~/.nova/outbox` for a companion bot to forward to your phone.
+- *"This".* "Fix this" or "what am I looking at" arrives with the window in
+  front, what you copied recently (never anything shaped like a key) and a
+  fresh screenshot, so she never asks what "this" is.
+- *Open loops.* Things you park are filed with a `[[loop: ...]]` marker and
+  closed with `[[done: ...]]`, so "where did we leave off?" has an answer.
+- *Narrated work.* Long background jobs get a spoken line every few minutes:
+  how many steps in, and what the worker is doing right now.
+- *Trust ladder.* With `ask_first` on, three yeses to the same kind of action
+  and she stops asking for it; one no takes it back. Deletes, pushes and
+  anything else destructive are never learned.
+
+**Voice out.** Three engines, each falling back to the next: ElevenLabs if
+you put a key in `~/.nova/elevenlabs.key`, Microsoft's neural voices through
+`edge-tts` (free, no key, the default), and Kokoro fully offline.
+`setup/pronounce_test.py` speaks a set of lines, transcribes them back with
+Whisper and reports any word that did not survive. Respell anything she
+reads wrongly under `voice.say_as` in `config.json`.
+
 **It stays up.** The watchdog restarts the bridge and wake listener if either
 dies; the bridge restarts the watchdog if *it* dies, using a heartbeat so a
 wedged watchdog counts as dead too. Hourly housekeeping caps the logs, screen

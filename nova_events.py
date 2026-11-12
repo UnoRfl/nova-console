@@ -43,6 +43,13 @@ DEFAULTS = {
     "watch_disk": True,
     "disk_warn_percent": 8,
     "briefing_time": "",          # e.g. "08:00"; empty = no morning briefing
+    "away_minutes": 10,           # no keyboard or mouse for this long = he has stepped away; 0 = off
+    "watch_headless": True,       # the headless PC answering, its panel, and the playit tunnel
+    "watch_gpu": True,
+    "gpu_warn_c": 86,
+    "watch_prs": [],              # e.g. ["owner/repo"]; needs the GitHub CLI signed in
+    "narrate_jobs_minutes": 5,    # a spoken line on a long job this often; 0 = only when it ends
+    "order_min_minutes": 5,       # a standing order is never checked more often than this
 }
 
 GAMES = {"robloxplayerbeta", "javaw", "valorant-win64-shipping", "valorant", "gamemd",
@@ -248,9 +255,13 @@ def save_routine(name: str, triggers: list[str], steps: list[dict], say: str = "
 class Events:
     """Owns the background loop. The bridge supplies the callbacks."""
 
-    def __init__(self, announce, ask=None, activity=None) -> None:
+    def __init__(self, announce, ask=None, activity=None, check=None, jobs=None, notify=None) -> None:
+        import nova_initiative as ni
         self._announce = announce          # (text) -> None, speaks now
         self._ask = ask                    # (prompt) -> None, runs a request and speaks the reply
+        self._check = check                # (prompt) -> str | None, a silent look for a standing order
+        self._notify = notify              # (text) -> None, reaches him away from the desk
+        self.jobs = jobs                   # nova_harness.Jobs, for narrating long work
         self.activity = activity
         self.reminders = Reminders()
         self.state = {"game_mode": False}
@@ -259,6 +270,19 @@ class Events:
         self.disk_warned = ""
         self.briefed = ""
         self.lock = threading.Lock()
+        self.ni = ni
+        self.presence = ni.Presence(cfg()["away_minutes"])
+        self.orders = ni.Orders()
+        self.missed: list[tuple[float, str]] = []   # said aloud while he was away: repeated when he is back
+        self.returned = 0.0                # how long he was gone, set on the tick he comes back
+        self.loops_told = ""               # the day open loops were last mentioned
+        self.stack: dict = {}              # last known state of the headless PC's services
+        self.headless_fails = 0
+        self.headless_down = False
+        self.tunnel_drops: list[float] = []
+        self.gpu_warned = 0.0
+        self.narrated: dict[str, tuple[float, int]] = {}   # job id -> (when, steps) last spoken
+        self.checking = False              # one standing-order check at a time
 
     # -- speaking, with manners
     def should_hold(self) -> str:
@@ -267,6 +291,8 @@ class Events:
             return "a game is running"
         if in_quiet_hours(c["quiet_hours"]):
             return "quiet hours"
+        if self.presence.away:
+            return "you are away"
         return ""
 
     def announce(self, text: str, urgent: bool = False) -> str:
@@ -278,18 +304,49 @@ class Events:
             if self.activity:
                 self.activity.push("system", "Held", f"{why}: {text[:120]}")
             return f"held ({why})"
+        if self.presence.away:
+            # Urgent, and nobody is at the desk to hear it. Say it anyway (he
+            # may be in the room), keep it for when he is back, and try to
+            # reach him wherever he is.
+            with self.lock:
+                self.missed.append((time.time(), text))
+            if self._notify:
+                try:
+                    self._notify(text)
+                except Exception:                     # noqa: BLE001
+                    pass
         self._announce(text)
         return "spoken"
 
     def flush_held(self) -> None:
         with self.lock:
-            if not self.held or self.should_hold():
+            back, self.returned = self.returned, 0.0
+            if self.should_hold():
+                self.returned = back                  # still a bad moment: keep the welcome for later
                 return
-            items, self.held = self.held, []
-        if len(items) == 1:
-            self._announce("While you were busy, Sir: " + items[0])
+            # Something said to an empty room is repeated -- unless he walked
+            # back in within a couple of minutes and so very likely heard it.
+            stale = time.time() - 120
+            items = [t for at, t in self.missed if at < stale] + self.held
+            self.held, self.missed = [], []
+        tail = ""
+        today = time.strftime("%Y-%m-%d")
+        if back >= 3600 and self.loops_told != today:
+            tail = self.ni.loops_line()
+            if tail:
+                self.loops_told = today
+        if not items and not tail:
+            return
+        items = [re.sub(r"^Sir,\s*", "", i) for i in items]
+        items = [i[:1].upper() + i[1:] for i in items]
+        if back >= 1800:
+            # Half an hour without touching anything is an absence. Less than
+            # that is as likely a video or a phone call at the desk, and
+            # "welcome back" to a man who never left is worse than nothing.
+            lead = f"Welcome back, Sir. You were away {self.ni.spoken_duration(back)}."
         else:
-            self._announce(f"While you were busy, Sir, {len(items)} things. " + " ".join(items))
+            lead = "While you were busy, Sir:" if len(items) == 1 else f"While you were busy, Sir, {len(items)} things."
+        self._announce(" ".join([lead, *items, tail]).strip())
 
     # -- routines
     def run_routine(self, name: str, collect_asks: bool = False) -> dict:
@@ -330,11 +387,14 @@ class Events:
                 "skipped": skipped, "asks": asks}
 
     # -- watchers
-    def check_minecraft(self) -> None:
+    def check_minecraft(self, status: str | None = None) -> None:
         import nova_tools
-        out = nova_tools.server_status().lower()
+        raw = nova_tools.server_status() if status is None else status
+        if cfg()["watch_headless"]:
+            self.check_stack(raw)
+        out = raw.lower()
         if "minecraft" not in out:
-            return                                    # headless PC unreachable: say nothing
+            return                                    # headless PC unreachable: check_stack speaks to that
         m = re.search(r"minecraft[^\n]*\b(up|down)\b", out)
         if not m:
             return
@@ -343,6 +403,134 @@ class Events:
             self.announce("Sir, the Minecraft server has " + ("come back up." if up else "gone down."),
                           urgent=not up)
         self.mc_up = up
+
+    def check_stack(self, status: str, now: float | None = None) -> None:
+        """The rest of the headless PC: is it answering at all, its panel, the tunnel."""
+        now = time.time() if now is None else now
+        state = self.ni.stack_state(status)
+        if not state:
+            # No answer. One miss is a blip; three in a row (six minutes) is news.
+            self.headless_fails += 1
+            if self.headless_fails == 3 and not self.headless_down:
+                self.headless_down = True
+                self.announce("Sir, the headless PC has stopped answering. The Minecraft server "
+                              "is unreachable from here.", urgent=True)
+            return
+        if self.headless_down:
+            self.announce("Sir, the headless PC is answering again.")
+        self.headless_fails, self.headless_down = 0, False
+        was = self.stack
+        if "tunnel" in state and "tunnel" in was and state["tunnel"] != was["tunnel"]:
+            if not state["tunnel"]:
+                self.tunnel_drops = [t for t in self.tunnel_drops if now - t < 3600] + [now]
+                if len(self.tunnel_drops) >= 3:
+                    self.announce(f"Sir, the playit tunnel has dropped {len(self.tunnel_drops)} times in "
+                                  "the last hour. It is flapping; players will be getting disconnected.",
+                                  urgent=True)
+                else:
+                    self.announce("Sir, the playit tunnel has gone down. Nobody outside can reach "
+                                  "the Minecraft server.", urgent=True)
+            else:
+                self.announce("Sir, the playit tunnel is back up.")
+        if "panel" in state and "panel" in was and state["panel"] != was["panel"]:
+            self.announce("Sir, the server panel has " + ("come back up." if state["panel"] else "gone down."))
+        self.stack = state
+
+    def check_gpu(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        if now - self.gpu_warned < 1800:
+            return
+        temp = self.ni.gpu_temp()
+        if temp is not None and temp >= int(cfg()["gpu_warn_c"]):
+            self.gpu_warned = now
+            self.announce(f"Sir, the graphics card is at {temp} degrees. That is hotter than it should run.",
+                          urgent=temp >= int(cfg()["gpu_warn_c"]) + 6)
+
+    def check_prs(self) -> None:
+        repos = [r for r in (cfg()["watch_prs"] or []) if isinstance(r, str)][:4]
+        if not repos:
+            return
+        state = self.ni.load_state()
+        seen = state.setdefault("prs", {})
+        for repo in repos:
+            snap = self.ni.pr_snapshot(repo)
+            if snap is None:
+                continue                              # offline or not signed in: try again later
+            for line in self.ni.pr_changes(seen.get(repo), snap, repo):
+                self.announce(line)
+            seen[repo] = snap
+        self.ni.save_state(state)
+
+    # -- presence
+    def check_presence(self) -> None:
+        self.presence.away_after = float(cfg()["away_minutes"]) * 60
+        change = self.presence.step()
+        if change == "left" and self.activity:
+            self.activity.push("system", "Away", "no input for a while; holding what is not urgent")
+        if change == "returned":
+            self.returned = self.presence.last_away
+            for o in self.orders.end_until_back():
+                # He asked her to watch something while he was out. If it never
+                # needed a word, say so: silence would leave him wondering.
+                if not o.get("told"):
+                    with self.lock:
+                        self.held.append(f"Nothing to report on {o['what'].rstrip('.')}.")
+            if self.activity:
+                self.activity.push("system", "Back", f"away {self.ni.spoken_duration(self.returned)}")
+
+    # -- standing orders
+    def check_orders(self) -> None:
+        self.orders.expire()
+        if self.checking or not self._check:
+            return
+        due = self.orders.due()
+        if not due:
+            return
+        item = due[0]
+        self.checking = True
+
+        def work():
+            try:
+                reply = self._check(self.ni.order_prompt(item))
+                if reply is None:                     # no engine, or over budget: try next time
+                    self.orders.mark(item["id"])
+                    return
+                said, done = self.ni.parse_order_reply(reply)
+                self.orders.mark(item["id"], said=said, done=done)
+                if self.activity:
+                    self.activity.push("system", "Watch", f"{item['what'][:60]}: "
+                                       + ("done" if done else "told" if said else "quiet"))
+                if said:
+                    self.announce(said if said.lower().startswith("sir") else "Sir, " + said[:1].lower() + said[1:],
+                                  urgent=done)
+            except Exception as exc:                  # noqa: BLE001
+                self.orders.mark(item["id"])
+                if self.activity:
+                    self.activity.push("system", "Watch error", f"{type(exc).__name__}: {exc}"[:160])
+            finally:
+                self.checking = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- narrated work
+    def narrate_jobs(self, now: float | None = None) -> None:
+        every = float(cfg()["narrate_jobs_minutes"]) * 60
+        if every <= 0 or not self.jobs:
+            return
+        now = time.time() if now is None else now
+        running = [j for j in self.jobs.list() if j["state"] == "running"]
+        for gone in set(self.narrated) - {j["id"] for j in running}:
+            self.narrated.pop(gone, None)
+        for j in running:
+            last_at, last_steps = self.narrated.get(j["id"], (j["started"], 0))
+            if now - last_at < every:
+                continue
+            prog = self.ni.job_progress(j.get("out") or "")
+            self.narrated[j["id"]] = (now, prog.get("steps", last_steps))
+            # Only when it has moved on, and only if this is a moment to talk:
+            # progress is not worth holding for later.
+            if prog and prog["steps"] > last_steps and not self.should_hold():
+                self._announce(self.ni.progress_line(j["title"], prog, (now - j["started"]) / 60))
 
     def check_disk(self) -> None:
         today = time.strftime("%Y-%m-%d")
@@ -375,14 +563,24 @@ class Events:
                         self._ask(item["text"])
                     else:
                         self.announce("Sir, a reminder: " + item["text"], urgent=True)
+                self.check_presence()
                 self.flush_held()
+                self.check_orders()
+                self.narrate_jobs()
                 c = cfg()
                 if tick % 12 == 0:                    # every two minutes
                     if c["watch_minecraft"]:
                         self.check_minecraft()
+                    elif c["watch_headless"]:
+                        import nova_tools
+                        self.check_stack(nova_tools.server_status())
                     if c["watch_disk"]:
                         self.check_disk()
+                    if c["watch_gpu"]:
+                        self.check_gpu()
                     self.check_briefing()
+                if tick % 60 == 30:                   # every ten minutes
+                    self.check_prs()
             except Exception as exc:                  # noqa: BLE001 -- never let the loop die
                 if self.activity:
                     self.activity.push("system", "Events error", f"{type(exc).__name__}: {exc}"[:160])

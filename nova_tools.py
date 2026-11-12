@@ -57,6 +57,10 @@ TIERS = {
     "list_jobs": "free", "job_result": "free", "engines_available": "free",
     "cancel_job": "announce",
     "start_job": "confirm",       # spends usage and may edit files: Sir says yes first
+    "job_progress": "free",
+    "keep_watch": "announce", "list_watches": "free", "cancel_watch": "announce",
+    "open_loops": "free", "close_loop": "announce",
+    "look_at_this": "free", "presence": "free",
 }
 
 MC_DIR = r"C:\Users\You\Downloads\mcserver"      # on the headless PC
@@ -518,7 +522,79 @@ def save_routine(name: str, triggers: list[str], steps: list[dict], say: str = "
     return f"Saved routine {r.get('name')}." if r.get("ok") else "Could not save that routine."
 
 
-ALL = [remind, list_reminders, cancel_reminder, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
+def job_progress(job_id: str = "") -> str:
+    """How far along a running background job is: steps taken and what it is doing now.
+    Leave job_id empty for every running job."""
+    r = bridge("/api/jobs/progress", {"id": job_id})
+    rows = r.get("jobs") or []
+    if not rows:
+        return r.get("error") or "No job is running."
+    return "\n".join(f"- {j['id']} {j['title']}: {j['minutes']} min, {j.get('steps', 0)} steps"
+                     + (f", now {j['doing']}" if j.get("doing") else "")
+                     + (f". Last said: {j['said']}" if j.get("said") else "") for j in rows)
+
+
+def keep_watch(what: str, every_minutes: int = 10, hours: float = 12, until_back: bool = False) -> str:
+    """Take a standing order: keep checking something on your own and speak up when it
+    changes. Use this whenever Sir says "keep an eye on", "tell me when", "let me know
+    if" or "watch the ..." -- never just promise to. Write `what` as a complete
+    instruction to your future self, including what counts as worth telling him
+    ("Tell Sir when the Blender render in Downloads/ad finishes: watch for blender.exe
+    to exit and a new mp4 to appear"). It is checked every every_minutes (5 at the
+    least) for `hours`, then dropped. until_back=True ends it when he is next at the
+    desk ("while I'm out", "until I'm back")."""
+    r = bridge("/api/orders", {"what": what, "every_minutes": every_minutes, "hours": hours,
+                               "until_back": until_back})
+    if r.get("error"):
+        return r["error"]
+    return (f"Watching, every {round(r['every'] / 60)} minutes"
+            + (", until he is back." if r.get("until_back")
+               else f", until {time.strftime('%a %H:%M', time.localtime(r['until']))}."))
+
+
+def list_watches() -> str:
+    """The standing orders you are keeping, and what you last said about each."""
+    items = bridge("/api/orders").get("orders") or []
+    return "\n".join(f"- {i['id']} every {round(i['every'] / 60)} min, checked {i['runs']} times: {i['what']}"
+                     + (f" (last told him: {i['said']})" if i.get("said") else "") for i in items) or "No standing orders."
+
+
+def cancel_watch(which: str) -> str:
+    """Stop a standing order, by its id or by words from it. "all" stops every one."""
+    gone = bridge("/api/orders/cancel", {"which": which}).get("cancelled") or []
+    return f"Stopped watching: {'; '.join(g['what'][:80] for g in gone)}" if gone else "No matching standing order."
+
+
+def open_loops() -> str:
+    """Things Sir left unfinished or said he would come back to, oldest first."""
+    items = nova_memory.loops()
+    return "\n".join(f"- ({i['at'][:10]}) {i['text']}" for i in items) or "Nothing is open."
+
+
+def close_loop(which: str) -> str:
+    """Mark an open loop finished, by words from it."""
+    gone = nova_memory.close_loop(which)
+    return f"Closed: {gone[0]}" if gone else "No matching open loop."
+
+
+def look_at_this() -> str:
+    """What Sir is pointing at when he says "this" or "that": the window in front, what
+    he copied recently, and a fresh screenshot path to Read. Usually this arrives with
+    his request already; call it when it did not and he clearly means something on screen."""
+    r = bridge("/api/context", {})
+    return r.get("context") or r.get("error") or "Nothing to go on."
+
+
+def presence() -> str:
+    """Whether Sir is at the desk right now, and how long he has been idle or away."""
+    r = bridge("/api/presence")
+    if r.get("error"):
+        return r["error"]
+    return json.dumps(r)
+
+
+ALL = [job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
+       remind, list_reminders, cancel_reminder, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
        remember, recall, forget, day_log, say,
        server_status, minecraft_players, minecraft_say, minecraft_save,
@@ -540,8 +616,17 @@ def approve(tool_name: str, input: dict, tool_use_id: str = "") -> str:
             return json.dumps({"behavior": "allow", "updatedInput": input})
         return json.dumps({"behavior": "deny",
                            "message": f"Refused outright ({why}). Tell Sir in one line; do not retry."})
+    if nova_gate.trusted(tool_name, input):
+        # He has said yes to this kind of thing often enough, and never no.
+        return json.dumps({"behavior": "allow", "updatedInput": input})
     r = bridge("/api/approve", {"tool": tool_name, "detail": verdict["detail"],
                                 "why": verdict["why"]}, timeout=60)
+    if r.get("answered"):
+        # Only a real answer teaches her anything; a timeout is not a "no".
+        earned = nova_gate.learn(tool_name, input, bool(r.get("allow")))
+        if earned:
+            bridge("/api/announce", {"text": "Sir, you have approved that kind of thing three times "
+                                             "now, so I shall stop asking for it."})
     if r.get("allow"):
         return json.dumps({"behavior": "allow", "updatedInput": input})
     reason = r.get("reason") or r.get("error") or "No approval was given."

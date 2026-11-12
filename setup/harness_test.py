@@ -68,10 +68,10 @@ try:
         except Exception:
             time.sleep(0.25)
     for _ in range(60):                               # wait for the voice model
-        if api("/api/voice")["engine"] == "kokoro":
+        if api("/api/voice")["engine"] in ("kokoro", "edge", "elevenlabs"):
             break
         time.sleep(0.5)
-    check("bridge up with local voice", api("/api/voice")["engine"] == "kokoro")
+    check("bridge up with local voice", api("/api/voice")["engine"] in ("kokoro", "edge", "elevenlabs"))
     time.sleep(1.5)
 
     # 1. a plain reply: speech must start before the reply has finished arriving

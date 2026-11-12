@@ -41,6 +41,7 @@ import nova_harness  # noqa: E402
 import nova_events  # noqa: E402
 import nova_presence  # noqa: E402
 import nova_router  # noqa: E402
+import nova_initiative  # noqa: E402
 
 try:                        # Nova's own voice. Optional: without it the HUD
     import nova_voice       # falls back to the browser's speech synthesis.
@@ -295,6 +296,40 @@ Rules for it:
   you were merely asked to look up.
 - Saying "noted" without emitting the marker means the fact is LOST. If it is
   worth acknowledging, it is worth the marker.
+
+OPEN LOOPS. You also keep track of what is left unfinished, the same way.
+When he parks something to come back to ("I'll finish the deck tomorrow",
+"let's pick this up later", "still need to test it on the phone"), or a task
+of yours ends with a part not done, append:
+
+  [[loop: Pitch deck -- phone mode is still untested]]
+
+and when something that was open gets finished, or he says it is done:
+
+  [[done: Pitch deck phone mode]]
+
+One short standalone line each, naming the project. Like the memory marker
+they are stripped before anything is spoken, so never mention them. Do not
+open a loop for something already finished in this reply, or for idle chat.
+When he asks where things were left, what is still open, or to be caught up,
+the open loops and the diary lines about that subject arrive with his
+question; answer from those, briefly, most recent first.
+
+INITIATIVE. You are expected to notice things and speak first, not only to
+answer. When he says "keep an eye on", "tell me when", "let me know if",
+"watch", or "while I'm out", take a standing order with keep_watch -- never
+merely promise to, because a promise without the tool is forgotten the moment
+this reply ends. You check it yourself on a timer and speak when it changes.
+If you see something he would want to know while doing something else (a
+failing server, a full disk, a job that ended badly), say so in one sentence
+at the end of your reply. If you think he is about to make a mistake, say so
+once, plainly, and then do what he decides.
+
+WHAT "THIS" MEANS. When his request points at something ("fix this", "what
+does that error mean", "what am I looking at"), a note arrives with it naming
+the window in front of him, what he copied recently, and the path of a fresh
+screenshot. Read the screenshot when the answer is on screen. Use what fits
+and ignore the rest; never ask him what "this" is before looking.
 
 THE PROJECTOR. The HUD in front of him has a holographic stage. You put
 something on it by appending ONE block to the end of your reply, after the
@@ -926,12 +961,15 @@ class Permissions:
 
         if not answered:
             self.activity.push("denied", entry["tool"], "no answer in time")
-            return {"allow": False,
+            return {"allow": False, "answered": False,
                     "reason": "Nova waited for you and got no answer, so it was blocked."}
 
         self.activity.push("allowed" if entry["allow"] else "denied",
                            entry["tool"], entry["reason"])
-        return {"allow": entry["allow"], "reason": entry["reason"]}
+        # "answered" is what the trust ladder learns from: a real yes or no,
+        # never a timeout or a cancel.
+        return {"allow": entry["allow"], "reason": entry["reason"],
+                "answered": entry["reason"] != "You cancelled."}
 
     def waiting(self) -> list[dict]:
         with self.lock:
@@ -1164,6 +1202,7 @@ class Backend:
             "brain": self.brain,
             "tts": ("kokoro" if nova_voice and self.cfg.get("tts", "kokoro") == "kokoro"
                     and not nova_voice.shared().error else "browser"),
+            "voice_engine": nova_voice.shared().status().get("engine") if nova_voice else "browser",
             "whisper": nova_stt.status(),
             "workdir": self.cfg["workdir"],
             "exe": CLAUDE or "",
@@ -1250,7 +1289,14 @@ class Backend:
         off goes straight to ask_fixed, the old single-model path.
         """
         if not self.routable(model):
-            return self.ask_fixed(prompt, None if model == "auto" else model, reset, timeout, speak)
+            owner = self.cfg.get("channel") in (None, "owner")
+            # A pinned model still hears what he said from his phone meanwhile.
+            note = self.context_for("fixed", self.seen_upto) if owner and not reset else ""
+            out = self.ask_fixed(note + prompt, None if model == "auto" else model, reset, timeout, speak)
+            if owner and "error" not in out:
+                self.record(route_text or prompt, out.get("text", ""), "fixed")
+                self.seen_upto = self.turn_no
+            return out
         if reset:
             self.recent, self.local_history = [], []
             for w in [self, *self.workers.values()]:
@@ -1340,6 +1386,7 @@ class Backend:
                 log(f"codex failed ({proc.returncode}): {tail}")
                 return {"error": "codex_error", "detail": tail or "Codex said nothing."}
             text, remembered = REMEMBER_PATTERN.sub("", text).strip(), []
+            text, _, _ = nova_initiative.harvest_loops(text, store=False)
             spoken = False
             if speak and nova_voice and not nova_voice.shared().error:
                 stream = nova_voice.shared().open_stream()
@@ -1420,6 +1467,7 @@ class Backend:
             # Markers are stripped, never stored, on the local path: a small
             # model cannot be trusted to decide what is worth remembering.
             text, remembered = REMEMBER_PATTERN.sub("", text).strip(), []
+            text, _, _ = nova_initiative.harvest_loops(text, store=False)
             self.activity.push("text", text[:400])
             return {"text": text, "ms": int((time.time() - began) * 1000), "turns": 1, "denials": 0,
                     "remembered": remembered, "memories": len(load_memories(limit=10_000)),
@@ -1512,8 +1560,16 @@ class Backend:
                 # A stranger must never be able to write to Sir's memory, not
                 # even by talking the model into emitting a marker.
                 text, remembered = REMEMBER_PATTERN.sub("", text).strip(), []
+                text, _, _ = nova_initiative.harvest_loops(text, store=False)
             else:
                 text, remembered = harvest_memories(text)
+                text, opened, closed = nova_initiative.harvest_loops(text)
+                for item in opened:
+                    log(f"loop opened: {item[:120]}")
+                    self.activity.push("remember", "Left open", item[:120])
+                for item in closed:
+                    log(f"loop closed: {item[:120]}")
+                    self.activity.push("remember", "Finished", item[:120])
             for fact in remembered:
                 self.activity.push("remember", "Remembered", fact[:120])
 
@@ -1770,6 +1826,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"reminders": self.server.events.reminders.list()})
             return
 
+        if route == "/api/orders":
+            self.send_json({"orders": self.server.events.orders.list()})
+            return
+
+        if route == "/api/presence":
+            ev = self.server.events
+            idle = nova_initiative.idle_seconds()
+            self.send_json({"at_desk": not ev.presence.away, "idle_seconds": round(idle),
+                            "away_for_seconds": round(time.time() - ev.presence.away_since) if ev.presence.away else 0,
+                            "holding": len(ev.held), "why_holding": ev.should_hold(),
+                            "watches": len(ev.orders.list()),
+                            "headless_answering": not ev.headless_down, "stack": ev.stack})
+            return
+
         if route == "/api/orb":
             # One word for what she is doing, for the on-screen orb.
             voice = nova_voice.shared() if nova_voice else None
@@ -1957,6 +2027,47 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/reminders/cancel":
             self.send_json({"cancelled": self.server.events.reminders.cancel(str(body.get("which") or ""))})
+            return
+
+        if route == "/api/orders":
+            # A standing order: something she keeps checking on her own.
+            try:
+                every, hours = float(body.get("every_minutes") or 10), float(body.get("hours") or 12)
+            except (TypeError, ValueError):
+                every, hours = 10.0, 12.0
+            item = self.server.events.orders.add(
+                str(body.get("what") or ""), every, hours, bool(body.get("until_back")),
+                min_minutes=float(nova_events.cfg()["order_min_minutes"]))
+            if "error" not in item:
+                log(f"standing order {item['id']} every {item['every'] / 60:.0f} min: {item['what'][:110]}")
+                self.server.activity.push("system", "Watching", item["what"][:120])
+            self.send_json(item)
+            return
+
+        if route == "/api/orders/cancel":
+            gone = self.server.events.orders.cancel(str(body.get("which") or ""))
+            for g in gone:
+                log(f"standing order {g['id']} cancelled")
+            self.send_json({"cancelled": gone})
+            return
+
+        if route == "/api/jobs/progress":
+            want = str(body.get("id") or "")
+            rows = []
+            for j in self.server.jobs.list():
+                if j["state"] != "running" or (want and j["id"] != want):
+                    continue
+                prog = nova_initiative.job_progress(j.get("out") or "")
+                rows.append({"id": j["id"], "title": j["title"],
+                             "minutes": max(1, round((time.time() - j["started"]) / 60)), **prog})
+            self.send_json({"jobs": rows})
+            return
+
+        if route == "/api/context":
+            # What "this" is, on demand (her look_at_this tool).
+            ctx = nova_initiative.deictic_context("what is this on my screen",
+                                                  self.server.events.presence.clip_changed_at)
+            self.send_json({"context": ctx})
             return
 
         if route == "/api/routines/run":
@@ -2290,6 +2401,21 @@ class Handler(BaseHTTPRequestHandler):
             if recalled:
                 asked += "\n\n" + recalled
 
+            # "Fix this", "what does that error mean": send along what he is
+            # pointing at, so she never has to ask what "this" is. Only at the
+            # desk -- a phone has no business receiving the desk's screen.
+            route_text = prompt
+            if profile == "owner":
+                try:
+                    pointing = nova_initiative.deictic_context(prompt, events.presence.clip_changed_at)
+                except Exception as exc:              # noqa: BLE001
+                    pointing = ""
+                    log(f"context failed: {type(exc).__name__}: {exc}")
+                if pointing:
+                    asked += "\n\n" + pointing
+                    route_text = prompt + " (on my screen)"   # needs eyes: never the tool-less chat model
+                    self.server.activity.push("system", "Context", "attached what he is pointing at")
+
             if self.server.usage.over("claude"):
                 msg = ("Today's Claude allowance is used up, Sir. Raise budget.claude_daily_usd "
                        "in config.json if you want me to carry on.")
@@ -2298,10 +2424,17 @@ class Handler(BaseHTTPRequestHandler):
 
             if profile == "remote":
                 # Sir, away from the desk: his memory and routines, read-only hands, no speech here.
-                result = self.server.guest("remote").ask(asked, None, bool(body.get("reset")))
+                # One Nova: he hears about what was said at the desk since he
+                # last spoke from here, and the desk hears about this in turn.
+                desk = self.server.backend
+                note = desk.context_for("away", self.server.away_seen)
+                result = self.server.guest("remote").ask(note + asked, None, bool(body.get("reset")))
+                if "error" not in result:
+                    desk.record(f"(from his {channel}) {prompt}", result.get("text", ""), "away")
+                    self.server.away_seen = desk.turn_no
             else:
                 result = self.server.backend.ask(asked, body.get("model"), bool(body.get("reset")),
-                                                 speak=bool(body.get("speak")), route_text=prompt)
+                                                 speak=bool(body.get("speak")), route_text=route_text)
             if "error" not in result:
                 nova_memory.log_exchange(prompt, result.get("text", ""))
                 warn = self.server.usage.add(result.get("engine") or "claude", result.get("cost", 0))
@@ -2379,6 +2512,7 @@ def housekeeping() -> None:
             freed += prune_dir(ROOT / "captures", 20, "utterance-*.wav")
             freed += prune_dir(ROOT / "uploads", 40)
             freed += prune_dir(ROOT / "builds", 60)
+            freed += prune_dir(ROOT / "outbox", 20, "*.json")
             rolled = [n for n, cap in (("bridge.log", 4_000_000), ("wake.log", 2_000_000),
                                        ("nova.log", 1_000_000), ("watch.log", 1_000_000))
                       if rotate_log(ROOT / n, cap)]
@@ -2462,15 +2596,21 @@ def main() -> int:
     httpd.permissions = Permissions(activity)
     guests: dict[str, Backend] = {}
 
-    def guest(profile: str) -> Backend:
-        """A separate, restricted Claude session per kind of outsider."""
-        if profile not in guests:
+    def guest(profile: str, key: str | None = None) -> Backend:
+        """A separate, restricted Claude session per kind of outsider.
+
+        `key` gives the same restrictions a session of its own, so her own
+        background checks do not land in the middle of his phone conversation.
+        """
+        key = key or profile
+        if key not in guests:
             gcfg = dict(cfg)
             gcfg.update(power="read", channel=profile, model="haiku")
-            guests[profile] = Backend(gcfg, Activity())     # its activity is not shown in the HUD
-        return guests[profile]
+            guests[key] = Backend(gcfg, Activity())         # its activity is not shown in the HUD
+        return guests[key]
 
     httpd.guest = guest
+    httpd.away_seen = 0             # the last desk turn his phone or Pocket Nova was told about
     httpd.last_wake = 0.0
     httpd.heard_at = 0.0            # a spoken request arrived and is about to be answered
     httpd.listening_until = 0.0     # the ears' window is open until then
@@ -2672,9 +2812,39 @@ def main() -> int:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def silent_check(prompt: str) -> str | None:
+        """One look for a standing order: read-only hands, nothing spoken, nothing kept.
+
+        A fresh session every time, so two hundred checks never pile up into
+        one enormous conversation, and it is the same restricted profile his
+        phone gets -- she can look at anything and change nothing.
+        """
+        if httpd.usage.over("claude"):
+            return None
+        watcher = guest("remote", key="watch")
+        try:
+            out = watcher.ask(prompt, None, True, timeout=150)
+        finally:
+            watcher.kill()                            # do not hold a process open between checks
+        if "error" in out or watcher.brain != "claude":
+            log(f"standing-order check could not run: {out.get('error') or 'no Claude'}")
+            return None
+        httpd.usage.add("claude", out.get("cost", 0))
+        return out.get("text", "")
+
+    def notify_away(text: str) -> None:
+        """Urgent, and he is not at the desk: leave it where the Discord bot will pick it up."""
+        if not nova_presence.cfg().get("discord", True):
+            return
+        box = ROOT / "outbox"
+        box.mkdir(exist_ok=True)
+        (box / f"{time.time():.3f}.json").write_text(
+            json.dumps({"at": time.time(), "text": text[:600]}), encoding="utf-8")
+
     httpd.answer_if_unclaimed = answer_if_unclaimed
-    httpd.events = nova_events.Events(announce=announce, ask=ask_and_speak, activity=activity)
     httpd.jobs = nova_harness.Jobs(on_done=job_done, default_dir=cfg["workdir"])
+    httpd.events = nova_events.Events(announce=announce, ask=ask_and_speak, activity=activity,
+                                      check=silent_check, jobs=httpd.jobs, notify=notify_away)
     httpd.daemon_threads = True
 
     url = f"http://127.0.0.1:{args.port}/?token={token}"

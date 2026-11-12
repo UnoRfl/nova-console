@@ -37,7 +37,7 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # ------------------------------------------------------------ sentence stream
 
-BLOCK_START = re.compile(r"::(?:CAD|MODEL|HOLO|BUILD)\b|\[\[\s*remember", re.IGNORECASE)
+BLOCK_START = re.compile(r"::(?:CAD|MODEL|HOLO|BUILD)\b|\[\[\s*(?:remember|loop|done)\b", re.IGNORECASE)
 SENTENCE_END = re.compile(r"(?<=[.!?])[\"')\]]?\s+")
 
 
@@ -275,8 +275,11 @@ class Jobs:
             # acceptEdits: the worker may edit files inside its own folder
             # without asking; shell commands are still refused. Starting a job
             # at all is a confirm-tier action, which is where Sir says yes.
-            return [exe, "-p", task, "--output-format", "json", "--model", model or "sonnet",
-                    "--permission-mode", "acceptEdits"]
+            # stream-json, not json: one event per line as the worker goes,
+            # which is what lets Nova say how far along it is. The last line
+            # is still the result object _watch reads.
+            return [exe, "-p", task, "--output-format", "stream-json", "--verbose",
+                    "--model", model or "sonnet", "--permission-mode", "acceptEdits"]
         if engine == "codex":
             exe = codex_exe()
             if not exe:
