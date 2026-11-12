@@ -1,9 +1,11 @@
-<#
+﻿<#
     AudioDefaults.ps1 -- inspect and set the Windows default INPUT device.
 
         .\AudioDefaults.ps1                       # list capture devices + roles
         .\AudioDefaults.ps1 -SetDefault <id>      # make one device default for every role
         .\AudioDefaults.ps1 -AlignRoles           # point every role at whatever Console uses
+        .\AudioDefaults.ps1 -Keep K18             # run forever: whenever a mic named *K18* is
+                                                  # connected, make it the default for every role
 
     Why this exists: Windows keeps THREE separate defaults for input --
     Console, Multimedia and Communications. Different software asks for
@@ -18,7 +20,8 @@
 #>
 param(
     [string]$SetDefault,
-    [switch]$AlignRoles
+    [switch]$AlignRoles,
+    [string]$Keep
 )
 
 $ErrorActionPreference = 'Stop'
@@ -220,6 +223,35 @@ function Show-Endpoints {
         Write-Host ''
     }
     return $list
+}
+
+if ($Keep) {
+    # Mic keeper. A wireless mic that drops out makes Windows hand the default
+    # to another microphone, and it does not always hand it back. Every 3 s:
+    # if the wanted mic is connected and is not the default for all three
+    # roles, put it back. Only one keeper runs at a time (named mutex).
+    $log = Join-Path $PSScriptRoot 'mic-keeper.log'
+    function KLog($m) { Add-Content -Path $log -Value ("{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) -Encoding utf8 }
+    $created = $false
+    $mutex = New-Object System.Threading.Mutex($true, 'Global\NovaMicKeeper', [ref]$created)
+    if (-not $created) { exit 0 }
+    KLog "keeper up -- holding *$Keep* as the default microphone"
+    $missing = $false
+    while ($true) {
+        try {
+            $want = [NovaAudio.Endpoints]::List() | Where-Object { $_.Name -like "*$Keep*" } | Select-Object -First 1
+            if (-not $want) {
+                if (-not $missing) { KLog "$Keep is not connected -- waiting for it"; $missing = $true }
+            } else {
+                if ($missing) { KLog "$Keep is back"; $missing = $false }
+                if (-not ($want.IsConsole -and $want.IsMultimedia -and $want.IsCommunications)) {
+                    $err = [NovaAudio.Endpoints]::SetDefault($want.Id)
+                    KLog $(if ($err) { "could not restore $($want.Name): $err" } else { "restored $($want.Name) as default" })
+                }
+            }
+        } catch { KLog "error: $($_.Exception.Message)" }
+        Start-Sleep -Seconds 3
+    }
 }
 
 $list = Show-Endpoints

@@ -559,9 +559,32 @@ class Ears:
 
         dev = self.cfg.get("input_device")
         first = True
+        waiting = False
         while True:
             try:
-                info = sd.query_devices(dev, "input")
+                if not first:
+                    # PortAudio lists devices once, at start-up. A wireless mic
+                    # that dropped and came back is invisible to that old list,
+                    # so rescan before every reopen.
+                    try:
+                        sd._terminate()
+                        sd._initialize()
+                    except Exception:                 # noqa: BLE001
+                        pass
+                try:
+                    info = sd.query_devices(dev, "input")
+                except Exception:
+                    if dev is None:
+                        raise
+                    # The pinned mic is missing. Wait for it -- never fall back
+                    # to a different microphone.
+                    if not waiting:
+                        log(f"pinned mic '{dev}' is not connected -- waiting for it (not switching mics)")
+                        waiting = True
+                    time.sleep(3)
+                    first = False
+                    continue
+                waiting = False
                 if first:
                     log(f"ears up -- mic '{info['name']}' (gain {self.cfg.get('input_gain', 1.0)}), "
                         f"whisper {self.whisper.name} on {self.whisper.device}, voiceprint "
