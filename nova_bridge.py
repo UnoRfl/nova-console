@@ -521,6 +521,10 @@ CHANNELS = {"panel": "owner", "voice": "owner", "phone": "remote", "pocket": "re
             "discord": "public", "public": "public"}
 
 
+# A reply that carries something for the projector stage.
+PROJECTION_RE = re.compile(r"::(CAD|MODEL|HOLO|BUILD)\b[\s\S]*?::END")
+
+
 def build_persona() -> str:
     """Assemble the standing brief: manner, who he is, his network, memories.
 
@@ -1624,6 +1628,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"waiting": self.server.permissions.waiting()})
             return
 
+        if route == "/api/projection":
+            # A model/diagram/file she produced while no panel was open (a
+            # voice answer with just the orb up). The panel was opened for it
+            # and claims it here, once. Stale ones (10 min) are dropped.
+            with self.server.projection_lock:
+                pj, self.server.projection = self.server.projection, None
+            if pj and time.time() - pj["at"] < 600:
+                self.send_json({"pending": True, "text": pj["text"]})
+            else:
+                self.send_json({"pending": False})
+            return
+
         if route == "/api/activity":
             # Everything that happened after the marker the panel last saw.
             marker = 0
@@ -2334,6 +2350,8 @@ def main() -> int:
     httpd.heard_at = 0.0            # a spoken request arrived and is about to be answered
     httpd.listening_until = 0.0     # the ears' window is open until then
     httpd.panel_seen = 0.0          # last time an open panel polled for a wake
+    httpd.projection = None         # a drawing waiting for the panel (voice path)
+    httpd.projection_lock = threading.Lock()
     httpd.turns = 0                 # requests being answered right now
     ears_cfg = cfg.get("ears") if isinstance(cfg.get("ears"), dict) else {}
     httpd.followup_seconds = float(ears_cfg.get("followup_seconds", 8.0))
@@ -2448,6 +2466,27 @@ def main() -> int:
 
     httpd.permissions.say = say_in_turn
 
+    def open_panel_for_projection() -> None:
+        """Open (or raise) the panel on the projector screen, maximised.
+
+        config `projector_screen`: "secondary" (default -- the monitor that is
+        not the main one, falling back to the main one), "primary", or "same"
+        (leave the window wherever it is).
+        """
+        where = str(cfg.get("projector_screen", "secondary")).lower()
+        script = (f". '{ROOT / 'NovaPanel.ps1'}'; "
+                  + ("Show-NovaPanel" if where == "same"
+                     else f"Show-NovaPanel -Screen {where} -Maximize"))
+        try:
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-WindowStyle", "Hidden", "-Command", script],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=0x08000000)
+            log(f"projection waiting; opening the panel ({where})")
+        except OSError as exc:
+            log(f"could not open the panel for a projection: {exc}")
+
     def answer_if_unclaimed(fired_at: float, utterance: str) -> None:
         """Answer a spoken request ourselves if no panel claims it.
 
@@ -2484,6 +2523,12 @@ def main() -> int:
                 speak_now("Sorry, Sir, something went wrong with that one.")
             elif out.get("text") and not out.get("spoken"):
                 speak_now(out["text"])
+            if not out.get("error") and PROJECTION_RE.search(out.get("text") or ""):
+                # She drew something, and nothing is on screen to show it:
+                # hold it for the panel and bring the panel up to play it.
+                with httpd.projection_lock:
+                    httpd.projection = {"text": out["text"], "at": time.time()}
+                open_panel_for_projection()
             # Wait for her to finish talking, then listen for a follow-up.
             # `active`, not `speaking`: between sentences she is briefly silent,
             # and opening the window there had her listening to herself.

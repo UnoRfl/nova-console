@@ -159,10 +159,37 @@ function Find-NovaWindow {
         Select-Object -First 1
 }
 
+if (-not ('NovaWinMove' -as [type])) {
+    Add-Type -Name 'NovaWinMove' -Namespace '' -MemberDefinition @'
+        [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int x, int y, int w, int h, bool repaint);
+'@
+}
+
+function Move-NovaPanel {
+    <#
+        Put the panel on a given monitor: 'secondary' (the one that is not the
+        main screen, else the main one) or 'primary'. -Maximize fills it.
+    #>
+    param([Parameter(Mandatory = $true)]$Window, [string]$Screen = 'secondary', [switch]$Maximize)
+    Add-Type -AssemblyName System.Windows.Forms
+    $all = [System.Windows.Forms.Screen]::AllScreens
+    $target = if ($Screen -eq 'primary') { $all | Where-Object Primary | Select-Object -First 1 }
+              else { $all | Where-Object { -not $_.Primary } | Select-Object -First 1 }
+    if (-not $target) { $target = [System.Windows.Forms.Screen]::PrimaryScreen }
+    $a = $target.WorkingArea
+    $h = $Window.MainWindowHandle
+    [void][NovaWin32]::ShowWindow($h, 9)                         # SW_RESTORE first, or it will not move
+    [void][NovaWinMove]::MoveWindow($h, $a.X + 40, $a.Y + 40, [Math]::Min(1280, $a.Width - 80), [Math]::Min(880, $a.Height - 80), $true)
+    if ($Maximize) { [void][NovaWin32]::ShowWindow($h, 3) }      # SW_MAXIMIZE on that monitor
+    [void][NovaWin32]::SetForegroundWindow($h)
+}
+
 function Show-NovaPanel {
     param(
         [int]$Width  = 1280,
         [int]$Height = 880,
+        [string]$Screen = '',
+        [switch]$Maximize,
         [switch]$Quiet
     )
 
@@ -174,6 +201,7 @@ function Show-NovaPanel {
         $h = $open.MainWindowHandle
         if ([NovaWin32]::IsIconic($h)) { [void][NovaWin32]::ShowWindow($h, 9) }  # SW_RESTORE
         [void][NovaWin32]::SetForegroundWindow($h)
+        if ($Screen) { Move-NovaPanel -Window $open -Screen $Screen -Maximize:$Maximize }
         Set-Content -Path $pidFile -Value $open.Id -Encoding utf8
         if (-not $Quiet) { Write-NovaLog "panel raised (pid $($open.Id))" }
         return $true
@@ -238,6 +266,7 @@ function Show-NovaPanel {
         Start-Sleep -Milliseconds 250
         $win = Find-NovaWindow
         if ($win) {
+            if ($Screen) { Move-NovaPanel -Window $win -Screen $Screen -Maximize:$Maximize }
             Set-Content -Path $pidFile -Value $win.Id -Encoding utf8
             if (-not $Quiet) { Write-NovaLog "panel opened (pid $($win.Id)) via $(Split-Path $browser -Leaf)" }
             return $true

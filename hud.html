@@ -2488,6 +2488,25 @@
               for (key in opts) o[key] = opts[key];
               if (Array.isArray(o.center) && o.center.length !== n) o.center = fit(o.center, n, "center", name);
               if (Array.isArray(o.size) && o.size.length !== n) o.size = fit(o.size, n, "size", name);
+              // A box written from corners (x1 - x0) comes out negative when
+              // the corners are given the other way round, and one such part
+              // used to fail the whole model. Take the size it plainly meant.
+              if (Array.isArray(o.size)) {
+                var bent = false;
+                o.size = o.size.map(function (v) {
+                  if (typeof v !== "number" || !isFinite(v)) return v;
+                  if (v < 0) { bent = true; return -v; }
+                  if (v === 0) { bent = true; return 0.01; }
+                  return v;
+                });
+                if (bent) notes.push(name + " was given a negative or zero size; it was built at the absolute size instead.");
+              }
+              ["radius", "height"].forEach(function (k) {
+                if (typeof o[k] === "number" && o[k] <= 0) {
+                  notes.push(name + " was given " + k + " " + o[k] + "; it was built at " + (Math.abs(o[k]) || 0.01) + " instead.");
+                  o[k] = Math.abs(o[k]) || 0.01;
+                }
+              });
               return fn(o);
             }
             return fn(opts);
@@ -4787,6 +4806,42 @@
       }
     } catch (e) { /* the ask path reports bridge trouble */ }
   }
+
+  // ------------------------------------------------------------- held projection
+  // She answered by voice with no panel open and drew something; the bridge
+  // held the drawing and opened this panel for it. Claim it and put it on the
+  // stage. Polled (not just at boot) because an already-open but minimised
+  // panel is raised rather than reloaded.
+  async function claimHeldProjection() {
+    let r;
+    try { r = await api("/api/projection"); } catch (e) { return; }
+    if (!r || !r.pending || !r.text) return;
+    const cut = splitProjection(String(r.text).trim());
+    if (!cut.kind) return;
+    const spec = cut.kind === "CAD" ? await parseCad(cut.header, cut.body)
+               : cut.kind === "MODEL" ? parseModel(cut.header + "\n" + cut.body)
+               : cut.kind === "HOLO" ? parseHolo(cut.header + "\n" + cut.body)
+               : parseBuild(cut.header, cut.body);
+    if (spec && spec.type === "cadfail") {
+      // Nobody is typing here to ask for a fix, so ask for one ourselves,
+      // once, with the failing code attached so whichever model answers can
+      // see exactly what to correct. The corrected block lands on the stage
+      // through the normal reply path.
+      sysLine("CAD kernel", "BUILD FAILED - REPAIRING", "warn");
+      notify("Her geometry code did not build (" + spec.error + "); asking her to fix it.");
+      dispatch("Your ::CAD code for \"" + (spec.title || "the model") + "\" did not build. The kernel said: "
+        + spec.error + ". Fix that one thing, keep everything else, and send the whole corrected ::CAD block "
+        + "with one short spoken line first. Here is the code that failed:\n\n"
+        + String(cut.body).slice(0, 14000));
+      return;
+    }
+    if (!spec) { sysLine("Projector", cut.kind + " MALFORMED", "warn"); return; }
+    projShow(spec);
+    sysLine("Projector", spec.type === "model" ? "CAD - " + spec.parts.length + " PARTS" : "FROM VOICE", "ok");
+    if (cut.prose) notify(cut.prose);
+  }
+  setTimeout(claimHeldProjection, 800);
+  setInterval(claimHeldProjection, 2000);
 
   // ------------------------------------------------------------- wake poll
   // The wake listener cannot reach this page directly, so it leaves a flag on
