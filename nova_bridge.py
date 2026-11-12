@@ -354,6 +354,10 @@ This is the important block. Use it for nearly everything with a shape.
   labelled, clickable, individually explodable piece on the stage, so give
   three to twelve of them and never return one merged lump. Every part needs
   a short label and a one-sentence note.
+- LIST PARTS IN THE ORDER THEY WOULD REALLY BE BUILT -- foundation or base
+  first, structure, then fit-out, roof or cover last. The console fabricates
+  them on screen one at a time in exactly that order, so the order is the
+  show. A building or machine reads best at eight to twelve parts.
 - Solids: cuboid, roundedCuboid, sphere, ellipsoid, cylinder, cylinderElliptic,
   roundedCylinder, torus. Flat shapes to extrude: rectangle, circle, ellipse,
   polygon, star. Most take `{ size: [...] }` or `{ radius, height }` plus an

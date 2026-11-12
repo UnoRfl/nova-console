@@ -302,6 +302,18 @@
   }
   .proj-label.lit { color: var(--ink); border-color: var(--nova); }
 
+  /* Fabrication readout: what is being built right now, and how far along. */
+  .fab-hud {
+    position: absolute; left: 12px; top: 10px; z-index: 2; pointer-events: none;
+    font-family: var(--mono); font-size: 9px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--ink-mid); transition: opacity .6s ease;
+  }
+  .fab-hud .fab-step { color: #ff8fb3; }
+  .fab-hud .fab-part { display: block; margin-top: 3px; font-size: 12px; letter-spacing: .14em; color: var(--ink); }
+  .fab-hud .fab-bar { display: block; margin-top: 6px; width: 170px; height: 2px; background: rgba(176,107,255,.18); }
+  .fab-hud .fab-bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--nova), #ff5d8f); box-shadow: 0 0 8px #ff5d8f; }
+  .fab-hud.done .fab-step { color: var(--nova); }
+
   .proj-note {
     position: relative; z-index: 3; border-top: 1px solid var(--line);
     background: rgba(8,5,16,.8); padding: 6px 11px; margin: 0;
@@ -682,6 +694,7 @@
                   title="Have Nova look at what she just built">Look</button>
           <button type="button" id="projDetail" class="wide" hidden
                   title="Ask Nova to add the next level of detail to this assembly"><svg class="ico" aria-hidden="true"><use href="#ic-mesh"></use></svg><span class="lbl">Detail</span></button>
+          <button type="button" id="projReplay" class="wide" hidden title="Watch it fabricate again"><span class="lbl">Rebuild</span></button>
           <button type="button" id="projCode" class="wide" hidden aria-pressed="false"><svg class="ico" aria-hidden="true"><use href="#ic-code"></use></svg><span class="lbl">Code</span></button>
           <button type="button" id="projSave" class="wide" hidden title="Keep this file"><svg class="ico" aria-hidden="true"><use href="#ic-floppy"></use></svg><span class="lbl">Save</span></button>
           <button type="button" id="projOut" aria-label="Zoom out" title="Zoom out">&minus;</button>
@@ -1954,6 +1967,7 @@
     look: document.getElementById("projLook"),
     detail: document.getElementById("projDetail"),
     code: document.getElementById("projCode"),
+    replay: document.getElementById("projReplay"),
     zin: document.getElementById("projIn"),
     zout: document.getElementById("projOut"),
     fit: document.getElementById("projFit"),
@@ -2641,6 +2655,7 @@
       // Never trust the loop to have run: finish the assembly, aim, and draw
       // once, here, so the buffer being read is a true picture of the model
       // whether or not a single frame has ever been delivered.
+      fabFinish();
       rigPlace(1);
       rigAim();
       rig.r.render(rig.scene, rig.cam);
@@ -3176,6 +3191,8 @@
     });
     if (rig.r) rig.r.dispose();
     rig.r = rig.scene = rig.cam = rig.root = null;
+    if (rig.fab && rig.fab.hud) rig.fab.hud.remove();
+    rig.fab = null;
     rig.parts = []; rig.picked = null; rig.spec = null;
   }
 
@@ -3284,10 +3301,14 @@
     rig.spin = !pjSlowMo; rig.on = true;
     rigAim();                      // correct before a single frame has run
     rig.mats = { lineMat, litMat, ghost, ghostLit };
-    // Parts assemble rather than appearing all at once.
+    // Parts are FABRICATED rather than dropped in: see fabStart. The old
+    // scale-up assembly is off; reduced motion gets the finished model.
     rig.born = performance.now();
-    rig.assembleMs = pjSlowMo ? 0 : 950;
+    rig.assembleMs = 0;
+    r.localClippingEnabled = true;
     pjEl.explode.value = "0";
+    rig.fab = null;
+    if (!pjSlowMo) fabStart();
     rigTick();
   }
 
@@ -3315,6 +3336,245 @@
       p.el.style.opacity = e < .9 ? "0" : p.el.style.opacity;
     });
   }
+
+  // ================================================================ fabrication
+  // The model is already fully built when it arrives -- this is presentation.
+  // Each part, in the order she listed them (foundation first), is fabricated:
+  // a particle swarm condenses out of the air around it, streams onto the
+  // part's real surface, and a glowing scan layer rises through it
+  // while its edges burn hot pink and cool to violet. Time is counted in
+  // frames actually shown (capped per frame), so a panel sitting behind
+  // another window does not finish the show unseen: it plays when he looks.
+  let fabDot = null;
+  function fabSprite() {
+    if (fabDot) return fabDot;
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d");
+    const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, "rgba(255,255,255,1)");
+    gr.addColorStop(.25, "rgba(255,190,230,.85)");
+    gr.addColorStop(1, "rgba(255,120,200,0)");
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+    fabDot = new THREE.CanvasTexture(c);
+    return fabDot;
+  }
+
+  // Area-weighted random points on a geometry's surface, in its own frame.
+  function fabSurface(geo) {
+    const pos = geo.attributes.position.array, idx = geo.index ? geo.index.array : null;
+    const tris = idx ? idx.length / 3 : pos.length / 9;
+    const cum = new Float64Array(tris);
+    const at = (k, o) => pos[(idx ? idx[k] : k) * 3 + o];
+    let tot = 0;
+    for (let t = 0; t < tris; t++) {
+      const a = 3*t, b = a+1, c = a+2;
+      const ux = at(b,0)-at(a,0), uy = at(b,1)-at(a,1), uz = at(b,2)-at(a,2);
+      const vx = at(c,0)-at(a,0), vy = at(c,1)-at(a,1), vz = at(c,2)-at(a,2);
+      const cx = uy*vz-uz*vy, cy = uz*vx-ux*vz, cz = ux*vy-uy*vx;
+      tot += 0.5 * Math.sqrt(cx*cx + cy*cy + cz*cz);
+      cum[t] = tot;
+    }
+    return { tot, sample(n) {
+      const out = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const r = Math.random() * tot;
+        let lo = 0, hi = tris - 1;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (cum[m] < r) lo = m + 1; else hi = m; }
+        let p = Math.random(), q = Math.random();
+        if (p + q > 1) { p = 1 - p; q = 1 - q; }
+        const a = 3*lo, b = a+1, c = a+2;
+        for (let o = 0; o < 3; o++)
+          out[i*3+o] = at(a,o) + p*(at(b,o)-at(a,o)) + q*(at(c,o)-at(a,o));
+      }
+      return out;
+    } };
+  }
+
+  function fabClear() {
+    const f = rig.fab;
+    if (!f) return;
+    for (const p of rig.parts) {
+      if (p.fab) {
+        if (p.fab.pts) { p.group.remove(p.fab.pts); p.fab.pts.geometry.dispose(); p.fab.pts.material.dispose(); }
+        if (p.fab.scan) { rig.scene.remove(p.fab.scan); p.fab.scan.geometry.dispose(); p.fab.scan.material.dispose(); }
+        p.fab.ghost.dispose(); p.fab.hot.dispose();
+        p.fab = null;
+      }
+      p.group.visible = true;
+      p.built = true;
+      if (rig.picked !== p) { p.mesh.material = rig.mats.ghost; p.edges.material = rig.mats.lineMat; }
+    }
+    if (f.ring) { rig.scene.remove(f.ring); f.ring.geometry.dispose(); f.ring.material.dispose(); }
+    if (f.hud) f.hud.remove();
+    rig.fab = null;
+  }
+
+  function fabStart() {
+    if (!rig.on || !rig.parts.length) return;
+    fabClear();
+    const n = rig.parts.length;
+    const D = Math.min(2.6, Math.max(1.4, 16 / n));         // one part, seconds
+    const stride = D * .62;                                   // next starts before this ends
+    const lead = .3;
+    const R = rig.radius * 1.12;
+    const centreY = rig.height * .5;
+
+    const ring = null;
+
+    const hud = document.createElement("div");
+    hud.className = "fab-hud";
+    hud.innerHTML = '<span class="fab-step"></span><span class="fab-part"></span><span class="fab-bar"><i></i></span>';
+    rig.labels.append(hud);
+
+    // Particle budget shared by surface area, so a slab gets more than a door.
+    const surf = rig.parts.map(p => fabSurface(p.mesh.geometry));
+    const area = surf.reduce((a, s) => a + s.tot, 0) || 1;
+    const budget = 9000;
+
+    rig.parts.forEach((p, i) => {
+      const count = Math.max(160, Math.min(1600, Math.round(budget * surf[i].tot / area)));
+      const ghost = rig.mats.ghost.clone();
+      const hot = new THREE.LineBasicMaterial({ color: new THREE.Color("#ffd1e6"), fog: true });
+      const plane = new THREE.Plane(new THREE.Vector3(0, -1, 0), -1e9);
+      ghost.clippingPlanes = [plane]; hot.clippingPlanes = [plane];
+      ghost.opacity = .17;
+      p.fab = { t0: lead + i * stride, dur: D, count, target: surf[i].sample(count),
+                start: null, pts: null, scan: null, plane, ghost, hot, landed: false };
+      p.built = false;
+      p.group.visible = false;
+    });
+
+    rig.fab = { clock: 0, last: 0, total: lead + (n - 1) * stride + D, ring, hud, R, centreY,
+                doneAt: 0 };
+    // Back the camera off a touch and sweep round while it builds.
+    rig.tDist = rig.frame * 1.08;
+  }
+
+  function fabLaunch(p) {
+    // Particles leave from wherever the ring is right now, in the part's frame.
+    // Particles condense out of a loose cloud around the part's own target
+    // points -- scattered outward and lifted -- then stream onto the surface.
+    const n = p.fab.count, start = new Float32Array(n * 3), G = p.fab.target;
+    const spread = rig.span * .45;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, b = Math.acos(2 * Math.random() - 1);
+      const r = spread * (.35 + .65 * Math.cbrt(Math.random()));
+      start[i*3]   = G[i*3]   + r * Math.sin(b) * Math.cos(a);
+      start[i*3+1] = G[i*3+1] + Math.abs(r * Math.cos(b)) * .8 + rig.span * .08;
+      start[i*3+2] = G[i*3+2] + r * Math.sin(b) * Math.sin(a);
+    }
+    p.fab.start = start;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(start.slice(), 3));
+    p.fab.pts = new THREE.Points(g, new THREE.PointsMaterial({
+      size: rig.span * .03, map: fabSprite(), color: new THREE.Color("#ff9cc8"),
+      transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+    p.group.add(p.fab.pts);
+    p.group.visible = true;
+    p.mesh.material = p.fab.ghost; p.edges.material = p.fab.hot;
+    p.mesh.visible = p.edges.visible = false;
+  }
+
+  function fabScan(p, h, box) {
+    // A thin glowing layer at the current print height, the footprint of the part.
+    if (!p.fab.scan) {
+      const g = new THREE.PlaneGeometry(1, 1);
+      g.rotateX(-Math.PI / 2);
+      p.fab.scan = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+        color: new THREE.Color("#ff5d8f"), transparent: true, opacity: .2,
+        depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
+      rig.scene.add(p.fab.scan);
+    }
+    const s = p.fab.scan;
+    s.scale.set(Math.max(1, box.max.x - box.min.x) * 1.04, 1, Math.max(1, box.max.z - box.min.z) * 1.04);
+    s.position.set((box.min.x + box.max.x) / 2, h, (box.min.z + box.max.z) / 2);
+  }
+
+  const fabBox = { b: null };
+  function fabStep() {
+    const f = rig.fab;
+    if (!f) return;
+    const now = performance.now();
+    // Count shown time only: a hidden panel fires no frames, and a long gap
+    // (panel came back to the front) is clamped to one frame.
+    const dt = f.last ? Math.min(.05, (now - f.last) / 1000) : 0;
+    f.last = now;
+    f.clock += dt;
+    const T = f.clock;
+    if (!fabBox.b) fabBox.b = new THREE.Box3();
+
+
+    let current = null, built = 0;
+    for (const p of rig.parts) {
+      const q = p.fab;
+      if (!q) { built++; continue; }
+      const u = (T - q.t0) / q.dur;
+      if (u < 0) continue;
+      if (!q.start) fabLaunch(p);
+      if (u < 1) current = current || p;
+
+      // 1. swarm: fly from the ring onto the surface, swirling as it comes
+      const fly = Math.min(1, u / .5);
+      const e = 1 - Math.pow(1 - fly, 3);
+      const arr = q.pts.geometry.attributes.position.array, S = q.start, G = q.target;
+      const ang = (1 - e) * 2.4, ca = Math.cos(ang), sa = Math.sin(ang);
+      for (let i = 0; i < arr.length; i += 3) {
+        const x = S[i] + (G[i] - S[i]) * e, y = S[i+1] + (G[i+1] - S[i+1]) * e, z = S[i+2] + (G[i+2] - S[i+2]) * e;
+        arr[i] = x * ca - z * sa; arr[i+1] = y; arr[i+2] = x * sa + z * ca;
+      }
+      q.pts.geometry.attributes.position.needsUpdate = true;
+      q.pts.material.opacity = Math.min(1, u / .12) * (u < .75 ? 1 : Math.max(0, 1 - (u - .75) / .25));
+      q.pts.material.size = rig.span * (.03 - .016 * e);
+
+      // 2. print: a layer rises through the part, solid below it
+      const pr = Math.max(0, Math.min(1, (u - .3) / .62));
+      if (pr > 0) {
+        p.mesh.visible = p.edges.visible = true;
+        fabBox.b.setFromObject(p.mesh);
+        const lo = fabBox.b.min.y, hi = fabBox.b.max.y;
+        const h = lo + (hi - lo) * (1 - Math.pow(1 - pr, 2)) + (pr >= 1 ? 1e6 : 0);
+        q.plane.constant = h;
+        if (pr < 1) fabScan(p, Math.min(h, hi), fabBox.b);
+        else if (q.scan) q.scan.visible = false;
+      }
+
+      // 3. cool: edges go from white-hot to her violet once the layer passes
+      const cool = Math.max(0, Math.min(1, (u - .85) / .15));
+      q.hot.color.set("#ffd1e6").lerp(new THREE.Color(pjHue.line), cool);
+
+      if (u >= 1) {
+        p.group.remove(q.pts); q.pts.geometry.dispose(); q.pts.material.dispose();
+        if (q.scan) { rig.scene.remove(q.scan); q.scan.geometry.dispose(); q.scan.material.dispose(); }
+        q.ghost.dispose(); q.hot.dispose();
+        p.fab = null; p.built = true;
+        if (rig.picked !== p) { p.mesh.material = rig.mats.ghost; p.edges.material = rig.mats.lineMat; }
+        built++;
+      }
+    }
+
+    const n = rig.parts.length;
+    const step = f.hud.querySelector(".fab-step"), part = f.hud.querySelector(".fab-part");
+    f.hud.querySelector(".fab-bar i").style.width = Math.min(100, 100 * T / f.total).toFixed(1) + "%";
+    if (built < n) {
+      const idx = current ? rig.parts.indexOf(current) + 1 : Math.min(n, built + 1);
+      step.textContent = "Fabricating  " + idx + " / " + n;
+      part.textContent = current ? current.spec.label : "";
+    } else {
+      if (!f.doneAt) {
+        f.doneAt = T;
+        f.hud.classList.add("done");
+        step.textContent = "Fabrication complete";
+        part.textContent = (rig.spec && rig.spec.title) || "";
+        rig.tDist = rig.frame;
+      }
+      if (T - f.doneAt > 3.2) f.hud.style.opacity = "0";
+      if (T - f.doneAt > 4) { fabClear(); }
+    }
+  }
+
+  // Jump straight to the finished model (captures, and anything that must not wait).
+  function fabFinish() { if (rig.fab) fabClear(); }
 
   function rigAim() {
     if (!rig.cam) return;
@@ -3347,6 +3607,7 @@
 
     // Assembly: each part eases up into place on its own beat.
     rigPlace(rig.assembleMs ? (performance.now() - rig.born) / rig.assembleMs : 1);
+    fabStep();
     rigAim();
     rig.r.render(rig.scene, rig.cam);
 
@@ -3360,7 +3621,8 @@
       if (len < 1) { dx = 0; dy = -1; } else { dx /= len; dy /= len; }
       const push = 30 + len * .15;
       x += dx*push; y += dy*push;
-      p.el.style.opacity = rig.picked ? (rig.picked === p ? "1" : ".28") : ".62";
+      p.el.style.opacity = (rig.fab && !p.built) ? "0"
+                         : rig.picked ? (rig.picked === p ? "1" : ".28") : ".62";
       p.el.style.left = Math.round(Math.max(4, Math.min(w-4, x))) + "px";
       p.el.style.top  = Math.round(Math.max(4, Math.min(h-4, y))) + "px";
     }
@@ -3530,6 +3792,7 @@
                           : (HX_KIND[spec.kind] || "Diagram");
     pjEl.explodeWrap.hidden = spec.type !== "model";
     pjEl.detail.hidden = spec.type !== "model";
+    pjEl.replay.hidden = spec.type !== "model" || pjSlowMo;
     // The audit belongs to the projection, not to the reply that carried it:
     // recalling an assembly from the strip should say again what is wrong
     // with it. The notice bar is the one place a whole sentence fits.
@@ -3545,7 +3808,7 @@
 
     const paint = () => {
       try {
-        if (spec.type === "model") rigMount(spec);
+        if (spec.type === "model") { rigMount(spec); if (!pjSlowMo && spec.parts.length >= 3) projBig(true); }
         else if (spec.type === "build") { pjBuild.spec = spec; pjBuild.mode = "run"; buildPaint(); }
         else if (spec.type === "image") {
           rigStop();
@@ -3673,6 +3936,7 @@
   const PJ_DISMISS = /^(?:ok(?:ay)?[,.\s]*)?(?:nova[,.\s]*)?(?:(?:i'?m|we'?re)\s+done|done|thanks?,?\s*done|close(?:\s+(?:it|that|this))?|dismiss(?:\s+(?:it|that))?|clear(?:\s+(?:it|that|the\s+screen))?|hide(?:\s+(?:it|that))?|go\s+back)[.!]?$/i;
 
   pjEl.close.addEventListener("click", projClose);
+  pjEl.replay.addEventListener("click", () => { if (rig.on) fabStart(); });
   pjEl.save.addEventListener("click", projSave);
   pjEl.big.addEventListener("click", () => projBig(!pjState.big));
   pjEl.scrim.addEventListener("click", () => projBig(false));
@@ -3717,6 +3981,19 @@
     patch: spec => projShow(patchModel(pjState.spec, JSON.stringify(spec))),
     audit: () => (pjState.spec && pjState.spec.audit) || [],
     shot: () => pjCanvasShot(),
+    rebuild: () => fabStart(),
+    // Render the fabrication at t seconds without waiting on frames (a hidden
+    // panel gets ~2 fps). Returns a PNG data URL of the stage at that moment.
+    fabSeek: t => {
+      if (!rig.on) return null;
+      fabStart();
+      rig.tDist = rig.dist = rig.frame * 1.08;
+      rig.fab.clock = Math.max(0, +t || 0); rig.fab.last = 0;
+      fabStep(); rigAim(); rig.r.render(rig.scene, rig.cam);
+      return rig.r.domElement.toDataURL("image/png");
+    },
+    fabState: () => rig.fab ? { clock: +rig.fab.clock.toFixed(2), total: +rig.fab.total.toFixed(2),
+      built: rig.parts.filter(p => p.built).length, parts: rig.parts.length } : null,
     rigState: () => rig.on ? {
       dist: Math.round(rig.dist), frame: Math.round(rig.frame),
       height: Math.round(rig.height), span: Math.round(rig.span),
