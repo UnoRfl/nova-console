@@ -130,7 +130,7 @@ function Invoke-Status {
             $tok = Get-NovaToken
             $h = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -Headers @{ 'X-Nova-Token' = $tok } -TimeoutSec 5
             Write-Host "  claude      $($h.status)  [$($h.model)]"
-            Write-Host "  power       $($h.power)$(if ($h.power -eq 'full') { '   (everything available; risky actions ask first)' } else { '   (read-only)' })"
+            Write-Host "  power       $($h.power)$(if ($h.power -eq 'full') { '   (everything available; acts without asking)' } else { '   (read-only)' })"
             if ($h.status -ne 'ready' -and $h.detail) {
                 Write-Host ''
                 Write-Host "  $($h.detail)" -ForegroundColor Yellow

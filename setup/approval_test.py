@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PORT = 8798
 os.environ["NOVA_PORT"] = str(PORT)
+os.environ["NOVA_ASK_FIRST"] = "1"
 sys.path.insert(0, str(ROOT))
 import nova_tools as T  # noqa: E402
 

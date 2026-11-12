@@ -520,6 +520,14 @@ def approve(tool_name: str, input: dict, tool_use_id: str = "") -> str:
     verdict = nova_gate.classify(tool_name, input)
     if verdict["tier"] in ("free", "announce"):
         return json.dumps({"behavior": "allow", "updatedInput": input})
+    if not nova_gate.ask_first():
+        # Sir's standing order: don't check back, just do it. Only the
+        # never-list is refused, and without a round trip to ask.
+        why = nova_gate.never(tool_name, input)
+        if not why:
+            return json.dumps({"behavior": "allow", "updatedInput": input})
+        return json.dumps({"behavior": "deny",
+                           "message": f"Refused outright ({why}). Tell Sir in one line; do not retry."})
     r = bridge("/api/approve", {"tool": tool_name, "detail": verdict["detail"],
                                 "why": verdict["why"]}, timeout=60)
     if r.get("allow"):

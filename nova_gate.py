@@ -66,6 +66,42 @@ DANGEROUS_SHELL = re.compile(
     r"|>\s*[^&|]|\|\s*(?:sh|bash|powershell|pwsh|cmd)\b", re.IGNORECASE)
 
 
+# The only things Nova refuses outright when she is not asking first: wiping
+# disks or boot config, recursive deletes of a drive root or the home folder,
+# and touching keys/secrets. Everything else just happens.
+NEVER_SHELL = re.compile(
+    r"\b(?:format(?:-volume)?\s+(?:-driveletter\s+)?[a-z]:|(?:mkfs|diskpart|bcdedit|clear-disk|initialize-disk|cipher\s+/w)\b)"
+    r"|\b(?:rm|remove-item|del|rd|rmdir)\b[^\n;&|]*?(?:-r|-rf|-fr|/s|-recurse)[^\n;&|]*?"
+    r"(?:\s|[\"'])(?:/|~|[a-z]:[\\/]?|\$home|%userprofile%|c:[\\/]users[\\/][^\\/\s\"']+[\\/]?)(?:[\s\"']|$)",
+    re.IGNORECASE)
+NEVER_PATH = re.compile(
+    r"(\\|/)(\.ssh|\.gnupg|\.aws)(\\|/)|(^|\\|/)token$|credentials|id_rsa|\.pem$|\.key$|voiceprint\.npy",
+    re.IGNORECASE)
+
+
+def never(tool: str, params: dict) -> str:
+    """Reason string if this is on the never list, else ''."""
+    params = params if isinstance(params, dict) else {}
+    if tool == "Bash" and NEVER_SHELL.search(str(params.get("command", ""))):
+        return "wipes a disk, boot config, a drive root or the home folder"
+    if tool in EDIT_TOOLS and NEVER_PATH.search(str(params.get("file_path") or params.get("notebook_path") or "")):
+        return "keys or secrets"
+    return ""
+
+
+def ask_first() -> bool:
+    """config.ask_first: true = old behaviour (she asks before confirm-tier
+    actions). Default false: she just does it. NOVA_ASK_FIRST=1 forces it
+    (approval_test.py uses that)."""
+    import os
+    if os.environ.get("NOVA_ASK_FIRST") == "1":
+        return True
+    try:
+        return bool(json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig")).get("ask_first", False))
+    except (OSError, ValueError):
+        return False
+
+
 def project_dirs() -> list[str]:
     try:
         cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
