@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1689,6 +1690,9 @@ class Handler(BaseHTTPRequestHandler):
             self.server.last_wake = time.time()
             if utterance:
                 log(f"wake {phrase!r} + heard: {utterance[:110]!r}")
+                # The panel normally picks this up and asks. When the panel is
+                # closed or minimised nobody would, so the bridge answers it.
+                self.server.answer_if_unclaimed(self.server.wake.at, utterance)
             else:
                 log(f"wake signalled: {phrase!r}")
             self.send_json({"ok": True})
@@ -2324,6 +2328,51 @@ def main() -> int:
         threading.Thread(target=work, daemon=True).start()
 
     httpd.speak_now = speak_now
+
+    def answer_if_unclaimed(fired_at: float, utterance: str) -> None:
+        """Answer a spoken request ourselves if no panel claims it.
+
+        The ears only signal a wake and what was said; the panel used to be
+        the only thing that turned that into a question. With just the orb on
+        screen (or the panel minimised, which stops its polling) a request was
+        heard and then silently dropped. After a short grace period for an
+        open panel, the bridge claims the wake and runs it through /api/ask
+        exactly as the panel would, speaks the reply, then opens the
+        follow-up window so the conversation can carry on without her name.
+        """
+        def work():
+            time.sleep(1.3)
+            with httpd.wake.lock:
+                if httpd.wake.at != fired_at:
+                    return                          # the panel took it
+                httpd.wake.at, httpd.wake.data = 0.0, {}
+            log(f"no panel claimed it; answering by voice: {utterance[:80]!r}")
+            body = json.dumps({"prompt": utterance, "speak": True, "channel": "voice"}).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{httpd.server_address[1]}/api/ask", data=body, method="POST",
+                headers={"X-Nova-Token": httpd.token, "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=int(cfg.get("max_seconds", 180)) + 30) as r:
+                    out = json.loads(r.read().decode("utf-8") or "{}")
+            except Exception as exc:                # noqa: BLE001
+                out = {"error": "bridge", "detail": str(exc)}
+            if out.get("error"):
+                log(f"voice request failed: {out.get('error')}: {str(out.get('detail'))[:160]}")
+                speak_now("Sorry, Sir, something went wrong with that one.")
+            elif out.get("text") and not out.get("spoken"):
+                speak_now(out["text"])
+            # Wait for her to finish talking, then listen for a follow-up.
+            voice = nova_voice.shared() if nova_voice else None
+            for _ in range(240):
+                if not (voice and voice.speaking) and not backend.busy():
+                    break
+                time.sleep(0.25)
+            if cfg.get("follow_up", True):
+                httpd.listen.fire(reason="follow-up")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    httpd.answer_if_unclaimed = answer_if_unclaimed
     httpd.events = nova_events.Events(announce=announce, ask=ask_and_speak, activity=activity)
     httpd.jobs = nova_harness.Jobs(on_done=job_done, default_dir=cfg["workdir"])
     httpd.daemon_threads = True
