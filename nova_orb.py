@@ -19,8 +19,8 @@ Every quantity eases toward its target, and a change of state makes the rings
 surge and settle -- exactly as in the panel.
 
 By default the orb is DISPLAY ONLY: every click passes straight through to
-whatever is behind it. Control it by voice ("Nova, hide" / "come back") or
-`Nova.ps1 orb ...`. With "clickable": true in orb.json (`Nova.ps1 orb clickable`)
+whatever is behind it. Control it by voice ("Nova, hide" / "come back"),
+Ctrl+Alt+N anywhere in Windows (toggles hidden/shown), or `Nova.ps1 orb ...`. With "clickable": true in orb.json (`Nova.ps1 orb clickable`)
 left-click opens the full panel and right-click opens a small menu:
 
     Lock in place   the orb cannot be dragged; it stays exactly where it is
@@ -421,7 +421,23 @@ class Orb:
         except OSError:
             pass
         threading.Thread(target=self.poll, daemon=True).start()
+        self.hotkey_hits = 0
+        threading.Thread(target=self.hotkey, daemon=True).start()
         self.tick()
+
+    def hotkey(self) -> None:
+        """Ctrl+Alt+N anywhere in Windows flips the orb between shown and
+        hidden. Runs its own message loop; tick() does the actual toggle so tk
+        is only touched from its own thread."""
+        user32 = ctypes.windll.user32
+        MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, WM_HOTKEY = 0x1, 0x2, 0x4000, 0x0312
+        if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("N")):
+            print("orb: Ctrl+Alt+N is already taken by another program", file=sys.stderr)
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == WM_HOTKEY:
+                self.hotkey_hits += 1
 
     # ------------------------------------------------------------ plumbing
     def read_address(self) -> None:
@@ -526,7 +542,11 @@ class Orb:
         # few seconds after, and otherwise out of the way. "Offline" does not
         # count as doing something -- a stopped bridge should not summon her.
         self.frames += 1
-        if self.frames % 10 == 0:
+        if self.hotkey_hits:
+            self.hotkey_hits = 0
+            self.set_prefs(hidden=not self.hidden)
+            self.apply_prefs(self.read_prefs())
+        elif self.frames % 10 == 0:
             self.sync_prefs()
         if mode not in ("idle", "offline"):
             self.last_active = now
