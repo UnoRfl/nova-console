@@ -796,6 +796,16 @@ class Permissions:
         self.activity.push("permission", entry["tool"],
                            f"{entry['risk']}: {entry['detail'][:120]}")
         log(f"awaiting your decision [{entry['risk']}] {entry['tool']}: {entry['detail'][:120]}")
+        # Ask out loud. With only the orb on screen nothing else tells him she
+        # is waiting, and a silent wait just runs out into a "no". The ears
+        # see approval=true on /api/listen and take a spoken yes or no.
+        if nova_voice and not nova_voice.shared().error:
+            try:
+                stream = nova_voice.shared().open_stream()
+                stream.feed(f"Sir, may I {entry['detail'][:140]}? Yes or no.")
+                stream.close()
+            except Exception as exc:                 # noqa: BLE001
+                log(f"could not speak the approval question: {exc}")
 
         answered = entry["event"].wait(self.WAIT_SECONDS)
 

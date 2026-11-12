@@ -416,8 +416,14 @@ def main() -> int:
 
     from mcp.server.mcpserver import MCPServer
     server = MCPServer("nova")
-    for fn in ALL + [approve]:
+    for fn in ALL:
         server.tool()(fn)
+    # The permission-prompt tool must answer with ONE plain text block holding
+    # the {"behavior": ...} JSON. With structured output on (the library's
+    # default) the CLI reads the {"result": ...} wrapper instead and rejects it
+    # -- "Permission prompt tool returned an invalid result" -- which silently
+    # failed every gated Write, Edit and Bash call.
+    server.tool(structured_output=False)(approve)
     server.run()
     return 0
 

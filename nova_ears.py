@@ -65,7 +65,43 @@ DEFAULTS = {
     "armed_seconds": 8.0,             # how long after a bare "Nova" a request may follow
     "max_sentence": 25.0,
     "input_device": None,             # None = Windows default input
+    "input_gain": 1.0,                # a number, or "auto" to boost a quiet mic (like Discord does)
 }
+
+
+class Gain:
+    """Boost a quiet microphone before anything listens to it.
+
+    Some mics (wireless clip-ons especially) deliver speech far below normal
+    level and rely on the app to turn it up -- Discord does, so they sound
+    fine there, and Nova heard nothing at all. "auto" follows the loudest
+    recent speech and scales it toward a normal level; silence, including a
+    mic's own noise gate sending exact zeros, is left alone because there is
+    nothing to scale.
+    """
+
+    TARGET = 0.10          # rms we want loud speech to reach
+    FLOOR = 0.002          # never treat anything quieter than this as speech
+    MAX = 30.0
+    DECAY = 0.5 ** (1 / 90)  # per 32 ms block: the remembered peak halves in about 3 s
+
+    def __init__(self, setting) -> None:
+        self.auto = str(setting).lower() == "auto"
+        try:
+            self.fixed = 1.0 if self.auto else max(0.1, float(setting))
+        except (TypeError, ValueError):
+            self.fixed = 1.0
+        self.peak = 0.0
+        self.gain = 1.0
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        if not self.auto:
+            return x if self.fixed == 1.0 else np.clip(x * self.fixed, -1.0, 1.0)
+        rms = float(np.sqrt(np.mean(x * x))) if len(x) else 0.0
+        self.peak = max(rms, self.peak * self.DECAY)
+        want = min(self.MAX, max(1.0, self.TARGET / max(self.peak, self.FLOOR)))
+        self.gain += (want - self.gain) * (0.5 if want < self.gain else 0.05)   # duck fast, rise slowly
+        return np.clip(x * self.gain, -1.0, 1.0)
 
 
 # ------------------------------------------------------------------ helpers
@@ -396,9 +432,10 @@ class Ears:
 
         vad = make_vad(self.cfg)
         q: queue.Queue = queue.Queue()
+        gain = Gain(self.cfg.get("input_gain", 1.0))
 
         def on_audio(indata, frames, t, status):      # audio thread: just hand off
-            q.put(indata[:, 0].copy())
+            q.put(gain(indata[:, 0].copy()))
 
         def poll_followup() -> None:
             # The HUD asks for a follow-up when it finishes speaking.
@@ -415,7 +452,7 @@ class Ears:
 
         dev = self.cfg.get("input_device")
         info = sd.query_devices(dev, "input")
-        log(f"ears up -- mic '{info['name']}', whisper {self.whisper.name} on "
+        log(f"ears up -- mic '{info['name']}' (gain {self.cfg.get('input_gain', 1.0)}), whisper {self.whisper.name} on "
             f"{self.whisper.device}, voiceprint "
             f"{'enrolled' if self.speaker.print is not None else 'NOT ENROLLED (anyone can wake her)'}")
         for note in self.whisper.notes:
@@ -519,9 +556,10 @@ def enroll(cfg: dict) -> int:
     speaker = Speaker()
     vad = make_vad(cfg)
     q: queue.Queue = queue.Queue()
+    gain = Gain(cfg.get("input_gain", 1.0))
 
     def on_audio(indata, frames, t, status):
-        q.put(indata[:, 0].copy())
+        q.put(gain(indata[:, 0].copy()))
 
     dev = cfg.get("input_device")
     print(f"\nMicrophone: {sd.query_devices(dev, 'input')['name']}")

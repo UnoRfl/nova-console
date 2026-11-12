@@ -370,7 +370,9 @@ switch ($Command) {
                       'toggle' { $o['hidden'] = -not [bool]$o['hidden'] }
                       'lock'   { $o['locked'] = $true }
                       'unlock' { $o['locked'] = $false }
-                      default  { Write-Host 'usage: .\Nova.ps1 orb hide | show | toggle | lock | unlock' }
+                      'clickable'   { $o['clickable'] = $true }
+                      'passthrough' { $o['clickable'] = $false }
+                      default  { Write-Host 'usage: .\Nova.ps1 orb hide | show | toggle | lock | unlock | clickable | passthrough' }
                   }
                   # WriteAllText, not Set-Content: PowerShell 5.1 would add a BOM.
                   [IO.File]::WriteAllText($file, ($o | ConvertTo-Json -Compress))

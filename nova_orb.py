@@ -18,7 +18,10 @@ and state colours. Nothing here is a new design.
 Every quantity eases toward its target, and a change of state makes the rings
 surge and settle -- exactly as in the panel.
 
-Left-click opens the full panel. Right-click opens a small menu:
+By default the orb is DISPLAY ONLY: every click passes straight through to
+whatever is behind it. Control it by voice ("Nova, hide" / "come back") or
+`Nova.ps1 orb ...`. With "clickable": true in orb.json (`Nova.ps1 orb clickable`)
+left-click opens the full panel and right-click opens a small menu:
 
     Lock in place   the orb cannot be dragged; it stays exactly where it is
     Auto-hide       the orb fades out and lets clicks through, and comes back
@@ -341,11 +344,12 @@ class Surface:
         self.origin = wintypes.POINT(0, 0)
         self.blend = BLENDFUNCTION(0, 0, 255, 1)
         self.ghost = False
+        self.always_ghost = False             # display only: clicks always pass through
 
     def presence(self, v: float) -> None:
         """Fade the whole window, 0..1. At zero it also stops catching the mouse."""
         self.blend.SourceConstantAlpha = int(255 * max(0.0, min(1.0, v)))
-        ghost = v <= 0.0
+        ghost = v <= 0.0 or self.always_ghost
         if ghost != self.ghost:
             self.ghost = ghost
             style = self.user32.GetWindowLongW(self.hwnd, -20)
@@ -379,6 +383,10 @@ class Orb:
         self.root.update_idletasks()
         self.hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
         self.surface = Surface(self.hwnd)
+        # Display only, by default: the orb never catches a click, so whatever
+        # is behind it stays usable. "clickable": true in orb.json brings back
+        # click-to-open, drag and the right-click menu.
+        self.surface.always_ghost = not bool(prefs.get("clickable", False))
 
         self.root.bind("<ButtonPress-1>", self.press)
         self.root.bind("<B1-Motion>", self.drag)
@@ -457,6 +465,7 @@ class Orb:
 
     def apply_prefs(self, p: dict) -> None:
         self.locked = bool(p.get("locked", False))
+        self.surface.always_ghost = not bool(p.get("clickable", False))
         hidden = bool(p.get("hidden", False))
         if hidden and not self.hidden:
             self.last_active = 0.0                  # told to go: go now, do not linger
