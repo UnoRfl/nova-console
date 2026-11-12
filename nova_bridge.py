@@ -496,7 +496,12 @@ Requests that need you to check or do something are sent to your bigger engines
 automatically, so you will rarely see them. If one does reach you, do not pretend: say
 in one sentence that he should ask again starting with "use haiku" and you will handle
 it properly. Never invent a result, a status, a time or a number about his computer or
-the outside world."""
+the outside world.
+
+YOU HAVE NO TOOLS AND CANNOT DO ANYTHING ON THE PC. Never say you have done, removed,
+closed, opened, moved, changed, fixed or will do anything: you cannot, and saying so is
+a lie he will catch. If he asks you to do something, say only that you cannot do that
+from this small model and he should say "use haiku" first."""
 
 CODEX_BRIEF = """You are NOVA, the voice assistant of the man whose PC you run on, answering
 through the Codex engine. Address him as "Sir". Your reply is read aloud: one to three
@@ -624,6 +629,85 @@ ORB_REPLY = {
 }
 ORB_CHANGE = {"hide": {"hidden": True}, "show": {"hidden": False},
               "lock": {"locked": True}, "unlock": {"locked": False}}
+
+
+# "Remove the tab", "close it, I've seen it", "move it to my main monitor":
+# the panel window (where projections play) is hers to put away or move, at
+# once and with no model -- the local chat model has no tools and used to
+# answer "I've removed the tab" while doing nothing at all.
+_PANEL_THING = (r"(?:(?:the|that|this|my|your) )?(?:nova )?(?:tab|window|panel|projection|projector|"
+                r"hologram|model|house|build|blueprint|display|stage|hud|3d(?: model| thing)?|thing)")
+_PANEL_IT = r"(?:it|that|this|that one|this one)"
+_PANEL_CLOSE = re.compile(
+    r"\b(?:remove|close|hide|dismiss|minimi[sz]e|shut|clear|get rid of|put away|take down|take away|"
+    r"close out of)\s+(?:" + _PANEL_THING + r"|" + _PANEL_IT + r")\b"
+    r"|\btake (?:" + _PANEL_IT + r"|" + _PANEL_THING + r") (?:down|away|off(?: (?:my|the) screen)?)\b"
+    r"|\bi(?:'ve| have) seen (?:it|enough)\b|\bi(?:'m| am) done (?:with|looking)\b")
+_PANEL_MOVE = re.compile(
+    r"\b(?:move|put|send|throw|show)\s+(?:" + _PANEL_THING + r"|" + _PANEL_IT + r")\s+(?:back\s+)?(?:on|to|onto)\s+"
+    r"(?:my |the )?(main|primary|first|other|second|secondary|left|right)\s+(?:monitor|screen|display)\b")
+_PANEL_OPEN = re.compile(
+    r"\b(?:show|bring|pull|open|put)\s+(?:" + _PANEL_THING + r"|" + _PANEL_IT + r")\s+(?:up\s+)?(?:back|again)\b"
+    r"|\b(?:re)?open\s+(?:the |my )?(?:tab|panel|projection|hud)\b")
+_PANEL_OFFTOPIC = re.compile(r"\b(?:file|folder|downloads?|desktop|tab in|chrome|browser|discord|spotify|"
+                             r"steam|minecraft|server|roblox|game|app|program)\b")
+
+
+def panel_command(prompt: str, panel_open: bool) -> tuple[str, str] | None:
+    """('close'|'open'|'move', screen) when this is plainly about her panel window."""
+    said = " ".join(re.sub(r"[^a-z0-9' ]+", " ", (prompt or "").lower()).split())
+    if not said or len(said) > 160 or _PANEL_OFFTOPIC.search(said):
+        return None
+    m = _PANEL_MOVE.search(said)
+    if m:
+        where = "primary" if m.group(1) in ("main", "primary", "first", "right") else "secondary"
+        return "move", where
+    if _PANEL_OPEN.search(said):
+        return "open", ""
+    m = _PANEL_CLOSE.search(said)
+    if m:
+        bare = re.search(r"\b(?:it|that|this|that one|this one|seen it|seen enough|done)\b\s*$", m.group(0))
+        # "remove it" only means the panel when the panel is what is up.
+        if bare and not panel_open:
+            return None
+        return "close", ""
+    return None
+
+
+def panel_window(action: str, screen: str = "") -> str:
+    """Close, open, or move the panel window. Returns what was done, for her to say."""
+    lib = ROOT / "NovaPanel.ps1"
+    if action == "close":
+        script = (f". '{lib}'; $w = Find-NovaWindow; "
+                  "if ($w) { [void]$w.CloseMainWindow(); 'closed' } else { 'none' }")
+    elif action == "move":
+        script = f". '{lib}'; [void](Show-NovaPanel -Screen {screen or 'secondary'} -Maximize); 'moved'"
+    else:
+        where = str(cfg_get("projector_screen", "secondary")).lower()
+        script = (f". '{lib}'; [void](Show-NovaPanel" + ("" if where == "same" else f" -Screen {where} -Maximize")
+                  + "); 'opened'")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                             capture_output=True, text=True, timeout=25, stdin=subprocess.DEVNULL,
+                             creationflags=0x08000000)
+        return (out.stdout or "").strip().splitlines()[-1] if (out.stdout or "").strip() else "failed"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"failed: {exc}"
+
+
+def cfg_get(key: str, default=None):
+    try:
+        return json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig")).get(key, default)
+    except (OSError, ValueError, AttributeError):
+        return default
+
+
+PANEL_REPLY = {
+    "close": "Put away, Sir.",
+    "none": "There was nothing open to put away, Sir.",
+    "open": "Back up for you, Sir.",
+    "move": "Moved it over, Sir.",
+}
 
 
 def orb_command(prompt: str) -> str | None:
@@ -1770,6 +1854,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "bad_request", "detail": "Body was not valid JSON."}, 400)
                 return
 
+        if route == "/api/panel":
+            # Her nova_panel tool: close / open / move the panel window.
+            action = str(body.get("action") or "").lower()
+            if action in ("primary", "secondary"):
+                action, where = "move", action
+            else:
+                where = str(body.get("screen") or "")
+            if action not in ("close", "open", "move"):
+                self.send_json({"error": "bad_request", "detail": "action: close, open, primary or secondary"}, 400)
+                return
+            if action == "close":
+                with self.server.projection_lock:
+                    self.server.projection = None
+            res = panel_window(action, where)
+            log(f"panel {action} (tool): {res}")
+            self.send_json({"ok": not res.startswith("failed"), "result": res})
+            return
+
         if route == "/api/wake":
             phrase = str(body.get("phrase") or "")
             utterance = str(body.get("utterance") or "").strip()
@@ -2109,6 +2211,29 @@ class Handler(BaseHTTPRequestHandler):
                 spoken = self.server.speak_now(text) if body.get("speak") else False
                 self.send_json({"text": text, "ms": 0, "turns": 0, "denials": 0,
                                 "remembered": [], "orb": orb, "spoken": spoken,
+                                "memories": len(load_memories(limit=10_000))})
+                return
+
+            pc = panel_command(prompt, time.time() - self.server.panel_seen < 6
+                                       or channel == "panel")
+            if pc:
+                action, where = pc
+                with self.server.projection_lock:
+                    if action == "close":
+                        self.server.projection = None
+                text = PANEL_REPLY.get(action, "Done, Sir.")
+                spoken = self.server.speak_now(text)       # the panel may be closing: say it here
+                log(f"panel: {action} {where}".strip())
+                self.server.activity.push("system", "Panel", f"{action} {where}".strip())
+                # Answer first, then act, so a panel asking to close itself
+                # gets its reply before its window goes.
+                def act(a=action, w=where):
+                    time.sleep(0.6 if a == "close" else 0)
+                    res = panel_window(a, w)
+                    log(f"panel {a}: {res}")
+                threading.Thread(target=act, daemon=True).start()
+                self.send_json({"text": text, "ms": 0, "turns": 0, "denials": 0,
+                                "remembered": [], "panel": action, "spoken": spoken,
                                 "memories": len(load_memories(limit=10_000))})
                 return
 

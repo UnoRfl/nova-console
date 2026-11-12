@@ -99,7 +99,12 @@ TOOLS = re.compile(_words(
     r"remind", r"reminder", r"timer", r"alarm", r"schedule",
     r"lights?", r"rgb", r"download", r"install", r"uninstall", r"update",
     r"send", r"message", r"post", r"website", r"url", r"link", r"github", r"repo",
-    r"memory of", r"do you remember", r"what did i"))
+    r"memory of", r"do you remember", r"what did i",
+    # Doing something to a window, a tab, the panel or a screen is an action:
+    # the local chat model cannot act and must never get these.
+    r"remove", r"hide", r"dismiss", r"minimi[sz]e", r"maximi[sz]e", r"move", r"delete",
+    r"get rid of", r"take (?:it|that|this) (?:down|away|off)", r"put (?:it|that) away",
+    r"tab", r"window", r"panel", r"monitor", r"display", r"do it", r"did you"))
 
 # 3b'. Driving the PC: opening apps, typing, pressing keys. One or two tool
 # calls -- Haiku's job, however many words it takes to say.

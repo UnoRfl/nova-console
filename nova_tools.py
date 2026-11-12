@@ -47,7 +47,7 @@ TIERS = {
     "focus_window": "announce", "remember": "announce",
     "open_app": "announce", "type_text": "announce",
     "minecraft_say": "announce", "minecraft_save": "announce",
-    "forget": "confirm", "close_window": "confirm",
+    "forget": "confirm", "close_window": "confirm", "nova_panel": "free",
     "lock_pc": "confirm", "sleep_pc": "confirm", "display_off": "announce",
     "minecraft_restart": "confirm", "minecraft_stop": "confirm",
     "minecraft_start": "announce",
@@ -335,6 +335,18 @@ def close_window(name: str) -> str:
     return run_ps("Get-Windows.ps1", "-Close", name)
 
 
+def nova_panel(action: str) -> str:
+    """Your own panel window, where 3D models and projections play. action:
+    "close" (put it away -- use this when he says remove/close/hide the tab or he
+    has seen it), "open" (bring it back), "primary" or "secondary" (move it,
+    maximised, to his main or second monitor)."""
+    r = bridge("/api/panel", {"action": action})
+    if r.get("error"):
+        return f"Could not do that: {r.get('detail') or r['error']}"
+    return {"closed": "Panel closed.", "none": "The panel was not open.", "opened": "Panel opened.",
+            "moved": "Panel moved."}.get(r.get("result"), str(r.get("result")))
+
+
 def display_off() -> str:
     """Blank the monitors."""
     return run_ps("Set-System.ps1", "-DisplayOff")
@@ -507,7 +519,7 @@ def save_routine(name: str, triggers: list[str], steps: list[dict], say: str = "
 
 
 ALL = [remind, list_reminders, cancel_reminder, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
-       mute, media_key, focus_window, open_app, type_text, close_window, display_off, lock_pc, sleep_pc,
+       mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
        remember, recall, forget, day_log, say,
        server_status, minecraft_players, minecraft_say, minecraft_save,
        minecraft_start, minecraft_stop, minecraft_restart]
