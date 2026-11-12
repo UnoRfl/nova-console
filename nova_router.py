@@ -101,6 +101,15 @@ TOOLS = re.compile(_words(
     r"send", r"message", r"post", r"website", r"url", r"link", r"github", r"repo",
     r"memory of", r"do you remember", r"what did i"))
 
+# 3b'. Driving the PC: opening apps, typing, pressing keys. One or two tool
+# calls -- Haiku's job, however many words it takes to say.
+APP_CONTROL = re.compile(
+    r"^(?:can you |could you |please )?(?:open|launch|start|bring up|pull up|close|switch to|go to|"
+    r"type|press|paste)\b")
+CODEY = re.compile(_words(r"script", r"program", r"code", r"function", r"class", r"bot", r"mod",
+                          r"plugin", r"api", r"python", r"javascript", r"html", r"css", r"sql",
+                          r"repo", r"bug", r"error", r"compile"))
+
 # 3c. Writing or fixing code.
 CODE = re.compile(
     r"\b(?:write|make|build|create|code|program|scaffold|generate|refactor|debug|fix|port|convert)\b"
@@ -218,6 +227,8 @@ class Router:
                 and FOLLOW_UP.match(said)):
             return self.last_tier, "follow-up"
 
+        if APP_CONTROL.search(said) and not HARD.search(said) and not CODEY.search(said):
+            return "normal", "rules"                     # "open notepad and type hello"
         if CODE.search(said):
             return "code", "rules"
         needs_tools = bool(TOOLS.search(said))

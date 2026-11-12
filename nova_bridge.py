@@ -264,10 +264,15 @@ Your reply is read aloud by a speech synthesiser, so:
 Say "Sir" where it lands naturally -- opening or closing a reply, not wedged
 into the middle of every sentence.
 
-You have tools and can act on this machine. Say what you did, briefly, in the
-past tense. If something was refused by the safety gate, say so plainly in one
-line and suggest the alternative. Never claim to have done something you did
-not do.
+You have tools and can act on this machine. Work like a real assistant does,
+talking while you act: BEFORE the first tool call, say one short sentence of
+what you are about to do ("Opening Notepad now, Sir."), so he hears you start
+straight away; then act; then, when it is done, say what happened in a few
+words ("Done -- it says hello."). Your words are spoken the moment you write
+them, so never save everything for the end. If something was refused by the
+safety gate, say so plainly in one line and suggest the alternative. Never
+claim to have done something you did not do: if a tool returned an error, say
+it failed.
 
 MEMORY. You keep a long-term memory across sessions, and this is how you
 write to it. Whenever he states a durable fact about himself, his projects,
@@ -757,6 +762,16 @@ REMIND_STRIP = re.compile(
     re.IGNORECASE)
 
 
+def spoken_detail(detail: str) -> str:
+    """The gate's description, made fit to say aloud: no raw command lines."""
+    d = " ".join(str(detail).split())
+    if d.startswith("run the command:"):
+        cmd = d.split(":", 1)[1].strip()
+        first = re.split(r"[\s;|&]", cmd, maxsplit=1)[0].strip("\"'&. ")
+        return f"run a command using {Path(first).stem or 'the shell'}" if first else "run a command"
+    return d[:120]
+
+
 class Permissions:
     """Holds actions that need your yes, and blocks the gate until you give it.
 
@@ -772,6 +787,7 @@ class Permissions:
 
     def __init__(self, activity: Activity) -> None:
         self.activity = activity
+        self.say = lambda text: None          # replaced in main() once the voice exists
         self.pending: dict[str, dict] = {}
         self.lock = threading.Lock()
         self.counter = 0
@@ -799,13 +815,14 @@ class Permissions:
         # Ask out loud. With only the orb on screen nothing else tells him she
         # is waiting, and a silent wait just runs out into a "no". The ears
         # see approval=true on /api/listen and take a spoken yes or no.
-        if nova_voice and not nova_voice.shared().error:
-            try:
-                stream = nova_voice.shared().open_stream()
-                stream.feed(f"Sir, may I {entry['detail'][:140]}? Yes or no.")
-                stream.close()
-            except Exception as exc:                 # noqa: BLE001
-                log(f"could not speak the approval question: {exc}")
+        # self.say (set by main) queues it after whatever she is already
+        # saying in this turn, instead of opening a second voice that cuts
+        # her off mid-sentence.
+        question = f"May I {spoken_detail(entry['detail'])}? Yes or no."
+        try:
+            self.say(question)
+        except Exception as exc:                     # noqa: BLE001
+            log(f"could not speak the approval question: {exc}")
 
         answered = entry["event"].wait(self.WAIT_SECONDS)
 
@@ -991,6 +1008,11 @@ class Backend:
                     elif btype == "tool_use":
                         name = block.get("name", "tool")
                         self.activity.push("tool", name, describe_tool(name, block.get("input")))
+                        # Whatever she said before reaching for the tool ("Opening
+                        # Notepad now, Sir") is spoken now, while the tool runs --
+                        # not held back because it lacked a full stop.
+                        if self.streamer:
+                            self.streamer.flush()
                         # Reaching for a tool means a wait. Say so once, unless
                         # she has already started talking.
                         if (self.speech and not self.acked
@@ -1350,6 +1372,8 @@ class Backend:
                 self.proc.stdin.flush()
             except (OSError, ValueError, AttributeError) as exc:
                 self.kill()
+                if self.speech:
+                    self.speech.close()               # or the voice stays held open, silent
                 return {"error": "spawn_failed", "detail": f"could not send the prompt: {exc}"}
 
             if not self.done.wait(wait):
@@ -1579,7 +1603,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/wake":
             # Claiming is destructive: whoever asks first gets the wake.
-            self.send_json(self.server.wake.claim())
+            # Only an open, visible panel polls this, so the poll doubles as
+            # "a panel is here" -- and it is told the real state, so its own
+            # indicator cannot sit on "listening" after the moment has passed.
+            self.server.panel_seen = time.time()
+            out = self.server.wake.claim()
+            out["mode"] = self.server.mode()
+            self.send_json(out)
             return
 
         if route == "/api/permission":
@@ -1607,6 +1637,19 @@ class Handler(BaseHTTPRequestHandler):
             # "Sir is talking over her" from ordinary speech, and whether she
             # is waiting for a yes or no.
             out = self.server.listen.claim()
+            # The ears say how long their listening window still has to run
+            # (?window=seconds), which is the only honest source for the
+            # "listening" indicator: a timer here would only be a guess.
+            now = time.time()
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            for part in query.split("&"):
+                if part.startswith("window="):
+                    try:
+                        self.server.listening_until = now + max(0.0, min(60.0, float(part[7:])))
+                    except ValueError:
+                        pass
+            if out.get("pending"):
+                self.server.listening_until = now + self.server.followup_seconds
             out["speaking"] = bool(nova_voice and nova_voice.shared().speaking)
             out["approval"] = bool(self.server.permissions.waiting())
             self.send_json(out)
@@ -1646,6 +1689,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_text(b"Not found.", "text/plain; charset=utf-8", 404)
 
     def do_POST(self) -> None:
+        # A request being answered counts as "thinking" from the moment it
+        # arrives until the reply is sent, whichever engine or shortcut
+        # handles it. _post sets self.in_turn once it knows it is Sir asking.
+        self.in_turn = False
+        try:
+            self._post()
+        finally:
+            if self.in_turn:
+                self.server.turn(-1)
+
+    def _post(self) -> None:
         route = self.path.split("?", 1)[0]
         if not self.authorized():
             self.send_json({"error": "forbidden"}, 403)
@@ -1699,6 +1753,12 @@ class Handler(BaseHTTPRequestHandler):
             self.server.wake.fire(phrase=phrase, utterance=utterance)
             self.server.last_wake = time.time()
             if utterance:
+                # Heard, and about to be answered: thinking, not listening.
+                self.server.heard_at = time.time()
+                self.server.listening_until = 0.0
+            else:
+                self.server.listening_until = time.time() + self.server.armed_seconds
+            if utterance:
                 log(f"wake {phrase!r} + heard: {utterance[:110]!r}")
                 # The panel normally picks this up and asks. When the panel is
                 # closed or minimised nobody would, so the bridge answers it.
@@ -1712,6 +1772,7 @@ class Handler(BaseHTTPRequestHandler):
             # The panel has finished speaking and wants the listener to
             # capture a follow-up.
             self.server.listen.fire(reason=str(body.get("reason") or "follow-up"))
+            self.server.listening_until = max(self.server.listening_until, time.time() + 1.0)
             self.send_json({"ok": True})
             return
 
@@ -1790,16 +1851,11 @@ class Handler(BaseHTTPRequestHandler):
             detail = str(body.get("detail") or body.get("tool") or "do that")
             voice = nova_voice.shared() if nova_voice else None
             if voice and not voice.error:
-                def ask_aloud():
-                    voice.earcon("ask")
-                    time.sleep(0.4)
-                    stream = self.server.backend.speech
-                    line = f"Sir, shall I {detail}?"
-                    if stream is not None and not stream.done.is_set():
-                        stream.feed(line)           # join the reply already in flight
-                    else:
-                        voice.say(line)
-                threading.Thread(target=ask_aloud, daemon=True).start()
+                # Only the tone here. The question itself is spoken by
+                # Permissions.request, in turn with the reply in flight. This
+                # used to ask as well -- so she asked twice, and on a routed
+                # model the second voice cut the first off mid-sentence.
+                voice.earcon("ask")
             nova_presence.pocket_note("Nova needs your yes")
             verdict = self.server.permissions.request({
                 "tool": str(body.get("tool") or "tool"), "risk": "confirm",
@@ -1826,9 +1882,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/stop-speech":
-            stopped = bool(nova_voice and nova_voice.shared().stop())
+            by = str(body.get("by") or "panel")
+            # A voice can only stop speech that is audible. The panel's stop
+            # also cancels a reply that is open but has not started yet.
+            stopped = bool(nova_voice and nova_voice.shared().stop(force=(by != "voice")))
             if stopped:
-                log(f"speech interrupted ({str(body.get('by') or 'panel')})")
+                log(f"speech interrupted ({by})")
             self.send_json({"ok": True, "stopped": stopped})
             return
 
@@ -1997,6 +2056,9 @@ class Handler(BaseHTTPRequestHandler):
                 channel = "phone"
             profile = CHANNELS.get(channel, "public")
             log(f"ask[{channel}]: {prompt[:110]}")
+            if profile == "owner":
+                self.in_turn = True                   # released in do_POST
+                self.server.turn(+1)
 
             if profile == "public":
                 # Untrusted: no routines, no reminders, no memory, no diary,
@@ -2262,17 +2324,43 @@ def main() -> int:
 
     httpd.guest = guest
     httpd.last_wake = 0.0
+    httpd.heard_at = 0.0            # a spoken request arrived and is about to be answered
+    httpd.listening_until = 0.0     # the ears' window is open until then
+    httpd.panel_seen = 0.0          # last time an open panel polled for a wake
+    httpd.turns = 0                 # requests being answered right now
+    ears_cfg = cfg.get("ears") if isinstance(cfg.get("ears"), dict) else {}
+    httpd.followup_seconds = float(ears_cfg.get("followup_seconds", 8.0))
+    httpd.armed_seconds = float(ears_cfg.get("armed_seconds", 8.0))
+    turn_lock = threading.Lock()
+
+    def turn(step: int) -> None:
+        with turn_lock:
+            httpd.turns = max(0, httpd.turns + step)
+            if step > 0:
+                httpd.heard_at = 0.0                  # the request is in hand now
+
+    httpd.turn = turn
 
     def mode() -> str:
-        """One word for what she is doing right now."""
+        """One word for what she is doing right now.
+
+        Each state is read from the thing that actually knows: sound coming
+        out of the speakers, a request in flight, the ears' own window. The
+        old version said "listening" for eight seconds after any wake, so it
+        showed listening while she was already working, and showed nothing
+        during the follow-up window when she really was listening.
+        """
         voice = nova_voice.shared() if nova_voice else None
+        now = time.time()
         if httpd.permissions.waiting():
             return "approval"
         if voice and voice.speaking:
             return "speaking"
-        if backend.busy():
+        if backend.busy() or httpd.turns > 0 or now - httpd.heard_at < 4:
             return "thinking"
-        if time.time() - httpd.last_wake < 8:
+        if voice and voice.active:
+            return "speaking"                         # the last sentence is on its way
+        if now < httpd.listening_until:
             return "listening"
         return "idle"
 
@@ -2293,12 +2381,12 @@ def main() -> int:
         def work():
             voice = nova_voice.shared()
             for _ in range(240):                      # wait up to a minute for quiet
-                if not voice.speaking and not backend.busy():
+                if not voice.active and not backend.busy() and httpd.turns == 0:
                     break
                 time.sleep(0.25)
             voice.earcon("done")
             time.sleep(0.35)
-            voice.say(text)
+            voice.say(text, replace=False)            # never cut across a reply that just began
         threading.Thread(target=work, daemon=True).start()
 
     def job_done(job: dict) -> None:
@@ -2316,11 +2404,11 @@ def main() -> int:
 
     httpd.announce = announce
 
-    def speak_now(text: str) -> bool:
+    def speak_now(text: str, replace: bool = True) -> bool:
         """Speak a short fixed line as the reply to a request. True if it will be spoken."""
         if not nova_voice or cfg.get("tts", "kokoro") != "kokoro" or nova_voice.shared().error:
             return False
-        stream = nova_voice.shared().open_stream()
+        stream = nova_voice.shared().open_stream(replace=replace)
         stream.feed(text)
         stream.close()
         backend.speech = stream                       # so /api/speak {streamed} waits on it
@@ -2339,6 +2427,20 @@ def main() -> int:
 
     httpd.speak_now = speak_now
 
+    def say_in_turn(text: str) -> None:
+        """Speak after whatever she is saying in the turn in flight, or on its own."""
+        for w in [backend, *backend.workers.values()]:
+            # A reply that was talked over is finished: feeding it would say
+            # nothing, and an approval question would go unasked.
+            if w.lock.locked() and w.speech is not None and not w.speech.done.is_set():
+                if w.streamer:
+                    w.streamer.flush()
+                w.speech.feed(text)
+                return
+        speak_now(text, replace=False)
+
+    httpd.permissions.say = say_in_turn
+
     def answer_if_unclaimed(fired_at: float, utterance: str) -> None:
         """Answer a spoken request ourselves if no panel claims it.
 
@@ -2351,12 +2453,16 @@ def main() -> int:
         follow-up window so the conversation can carry on without her name.
         """
         def work():
-            time.sleep(1.3)
+            # The grace period is only for a panel that is actually open and
+            # polling. With just the orb, waiting 1.3 s was pure delay on
+            # every single request.
+            time.sleep(1.3 if time.time() - httpd.panel_seen < 2.5 else 0.05)
             with httpd.wake.lock:
                 if httpd.wake.at != fired_at:
                     return                          # the panel took it
                 httpd.wake.at, httpd.wake.data = 0.0, {}
             log(f"no panel claimed it; answering by voice: {utterance[:80]!r}")
+            httpd.heard_at = time.time()
             body = json.dumps({"prompt": utterance, "speak": True, "channel": "voice"}).encode("utf-8")
             req = urllib.request.Request(
                 f"http://127.0.0.1:{httpd.server_address[1]}/api/ask", data=body, method="POST",
@@ -2372,13 +2478,20 @@ def main() -> int:
             elif out.get("text") and not out.get("spoken"):
                 speak_now(out["text"])
             # Wait for her to finish talking, then listen for a follow-up.
+            # `active`, not `speaking`: between sentences she is briefly silent,
+            # and opening the window there had her listening to herself.
             voice = nova_voice.shared() if nova_voice else None
-            for _ in range(240):
-                if not (voice and voice.speaking) and not backend.busy():
+            time.sleep(0.15)
+            for _ in range(1600):
+                if not (voice and voice.active) and not backend.busy():
                     break
-                time.sleep(0.25)
+                time.sleep(0.03)
+            httpd.heard_at = 0.0
             if cfg.get("follow_up", True):
                 httpd.listen.fire(reason="follow-up")
+                # Bridge the quarter second until the ears pick this up, so
+                # the indicator does not blink idle between speaking and listening.
+                httpd.listening_until = max(httpd.listening_until, time.time() + 1.0)
 
         threading.Thread(target=work, daemon=True).start()
 

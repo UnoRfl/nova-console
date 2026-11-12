@@ -4521,7 +4521,25 @@
       if (state.busy || state.recognizing || document.hidden) return;
       try {
         const w = await api("/api/wake");
+        if (w && !w.pending && state.wakeListening) {
+          // The bridge knows whether the ears are still listening. Once they
+          // are not (the window lapsed, or she is already answering by voice)
+          // this panel must stop saying "listening" too.
+          if (w.mode && w.mode !== "listening") state.wakeMiss = (state.wakeMiss || 0) + 1;
+          else state.wakeMiss = 0;
+          if (state.wakeMiss >= 2) {
+            state.wakeListening = false;
+            state.wakeMiss = 0;
+            clearTimeout(state.captureTimer);
+            if (state.mode === "listening" && !state.busy) {
+              setMode("idle");
+              els.hint.textContent = "Say “Nova” · or hold to speak";
+            }
+          }
+        }
         if (!w || !w.pending) return;
+        state.wakeListening = false;
+        state.wakeMiss = 0;
 
         // Barge-in. Saying her name stops her mid-sentence -- and ONLY her
         // name can, because this line is reached solely when the offline
@@ -4556,6 +4574,7 @@
           els.heard.textContent = "";
           els.spoken.textContent = "";
           setMode("listening");
+          state.wakeListening = true;
           els.hint.textContent = "Listening — speak now";
           clearTimeout(state.captureTimer);
           // A backstop, not a limit. The Windows listener ends on silence and

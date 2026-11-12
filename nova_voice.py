@@ -142,6 +142,15 @@ class Voice:
         self.lock = threading.Lock()          # one utterance at a time
         self.load_lock = threading.Lock()
         self.stop_flag = threading.Event()
+        # Two different things, and confusing them was a real bug:
+        #   active    a reply is open. She may be silent -- still thinking,
+        #             or waiting for the next sentence to be synthesised.
+        #   speaking  sound is coming out of the speakers right now.
+        # Talk-over and the on-screen indicator must use `speaking`. When it
+        # was true for the whole reply, Sir finishing his own sentence while
+        # she was still thinking counted as "talking over her" and silently
+        # killed the answer before she had said a word.
+        self.active = False
         self.speaking = False
         self.level = 0.0                      # live loudness, for the HUD's visuals
         self.cache: dict[str, np.ndarray] = {}
@@ -176,7 +185,7 @@ class Voice:
 
     def status(self) -> dict:
         return {"engine": "kokoro" if self.k is not None else ("loading" if not self.error else "error"),
-                "voice": self.cfg["voice"], "speaking": self.speaking,
+                "voice": self.cfg["voice"], "speaking": self.speaking, "active": self.active,
                 "level": round(self.level, 3), "error": self.error}
 
     def voices(self) -> list[str]:
@@ -199,43 +208,76 @@ class Voice:
         vol = float(self.cfg["volume"])
         with sd.OutputStream(samplerate=self.rate, channels=1, dtype="float32",
                              device=self.cfg.get("output_device"), blocksize=block) as out:
+            waited = 0.0
             while True:
-                chunk = q.get()
+                if self.stop_flag.is_set():
+                    out.abort()                       # drop what is buffered: stop means now
+                    return True
+                try:
+                    chunk = q.get(timeout=0.1)
+                except queue.Empty:
+                    # Nothing to say yet. A short gap between sentences still
+                    # counts as speaking (so "stop" works mid-reply and the
+                    # indicator does not flicker); a long one does not.
+                    waited += 0.1
+                    if waited >= 0.6 and self.speaking:
+                        self.speaking = False
+                        self.level = 0.0
+                    continue
+                waited = 0.0
                 if chunk is None:
                     return False
+                self.speaking = True
                 for i in range(0, len(chunk), block):
                     if self.stop_flag.is_set():
+                        out.abort()
                         return True
                     piece = chunk[i:i + block] * vol
                     self.level = float(np.sqrt(np.mean(piece ** 2))) if len(piece) else 0.0
                     out.write(piece.reshape(-1, 1))
                 # A breath between sentences.
                 out.write(np.zeros((int(self.rate * 0.12), 1), dtype=np.float32))
+                self.level = 0.0
 
-    def open_stream(self, voice: str | None = None) -> "SpeechStream":
+    def open_stream(self, voice: str | None = None, replace: bool = True) -> "SpeechStream":
         """Start speaking text that has not finished arriving yet.
 
         feed() it sentences as the model produces them, close() when the reply
         is complete, wait() for the audio to finish. This is what lets her
         start talking before she has finished thinking.
-        """
-        return SpeechStream(self, voice)
 
-    def say(self, text: str, voice: str | None = None) -> dict:
+        replace=True is for the answer to a new request: it cuts off whatever
+        she was saying before. replace=False is for things she says on her own
+        (an announcement, a reminder, "may I ...?"): those wait their turn and
+        never cut a reply off mid-sentence.
+        """
+        return SpeechStream(self, voice, replace)
+
+    def say(self, text: str, voice: str | None = None, replace: bool = True) -> dict:
         """Speak text. Blocks until finished or interrupted."""
         if not speakable(text):
             return {"ok": True, "spoken": 0, "interrupted": False}
-        st = self.open_stream(voice)
+        st = self.open_stream(voice, replace)
         st.feed(text)
         st.close()
         return st.wait()
 
-    def stop(self) -> bool:
-        """Cut speech off now. Returns True if something was actually playing."""
-        was = self.speaking
+    def stop(self, force: bool = False) -> bool:
+        """Cut speech off now. Returns True if something was actually stopped.
+
+        By default only audible speech is stopped, so a voice heard while she
+        is still thinking cannot cancel a reply she has not started. force=True
+        (the panel's stop button) also cancels a reply that is open but silent.
+        """
+        was = self.speaking or (force and self.active)
         if was:
             self.stop_flag.set()
         return was
+
+    def cancel(self) -> None:
+        """Make way for a new reply: end the open one, audible or not."""
+        if self.active:
+            self.stop_flag.set()
 
     def ack(self, kind: str = "ack") -> dict:
         lines = ACKS.get(kind) or ACKS["ack"]
@@ -258,9 +300,10 @@ class Voice:
 class SpeechStream:
     """One spoken reply, fed a piece at a time. See Voice.open_stream()."""
 
-    def __init__(self, voice: Voice, voice_name: str | None = None) -> None:
+    def __init__(self, voice: Voice, voice_name: str | None = None, replace: bool = True) -> None:
         self.v = voice
         self.voice_name = voice_name
+        self.replace = replace
         self.texts: "queue.Queue[str | None]" = queue.Queue()
         self.done = threading.Event()
         self.result: dict = {}
@@ -287,10 +330,11 @@ class SpeechStream:
             self.done.set()
             return
 
-        v.stop()                                      # a new reply replaces the old one
+        if self.replace:
+            v.cancel()                                # a new reply replaces the old one
         with v.lock:
             v.stop_flag.clear()
-            v.speaking = True
+            v.active = True                           # `speaking` waits for actual sound
             began = time.time()
             first_audio = [None]
             spoken = [0]
@@ -308,7 +352,12 @@ class SpeechStream:
                         for part in sentences(text):
                             if v.stop_flag.is_set():
                                 break
-                            chunk = v.synth(part, self.voice_name)
+                            try:
+                                chunk = v.synth(part, self.voice_name)
+                            except Exception:         # noqa: BLE001
+                                # One sentence the synthesiser chokes on must
+                                # not silence the rest of the reply.
+                                continue
                             if first_audio[0] is None:
                                 first_audio[0] = time.time() - began
                             spoken[0] += 1
@@ -341,6 +390,7 @@ class SpeechStream:
             v.stop_flag.set()                         # release the producer either way
             t.join(timeout=5)
             v.speaking = False
+            v.active = False
             v.level = 0.0
         self.done.set()
 

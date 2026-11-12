@@ -47,7 +47,11 @@ CASES = [
 ANSWERS = [("yes", True), ("Yes, go ahead.", True), ("do it", True), ("okay Nova", True),
            ("no", False), ("No, cancel that.", False), ("wait", False), ("don't", False),
            ("yes but first delete everything", None), ("what time is it", None), ("", None),
-           ("yesterday I went out", None)]
+           ("yesterday I went out", None),
+           ("Accept.", True), ("Yes, open it.", True), ("sure, go ahead and do that", True),
+           ("of course", True), ("accept it please", True),
+           ("yes and then delete the folder", None), ("yes but not that one", None),
+           ("okay what is it doing", None), ("yes, actually open chrome instead", None)]
 
 bad = 0
 for tool, params, want in CASES:

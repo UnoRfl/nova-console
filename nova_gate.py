@@ -163,12 +163,26 @@ NO = re.compile(r"^\s*(?:no|nope|nah|stop|cancel|don'?t|do not|deny|denied|negat
                 r"never ?mind|leave it|hold on|wait)\b.*$", re.IGNORECASE)
 
 
+# People do not answer with a bare "yes". "Accept", "yes open it", "sure go
+# ahead and do that" are all a yes -- as long as nothing in it adds a condition
+# or a different instruction.
+AFFIRM_START = re.compile(r"^\s*(?:yes|yeah|yep|yup|sure|ok|okay|accept(?:ed)?|allow(?:ed)?|approve[d]?|"
+                          r"go ahead|do it|go for it|of course|absolutely|definitely|confirm(?:ed)?|"
+                          r"please do|proceed|affirmative|alright|all right|fine)\b", re.IGNORECASE)
+NOT_A_PLAIN_YES = re.compile(r"\b(?:but|except|first|instead|before|after|then|also|and then|delete|remove|"
+                             r"erase|format|kill|stop|not|no|don'?t|never|wait|hold|cancel|unless|only|"
+                             r"rather|actually|what|why|how)\b", re.IGNORECASE)
+
+
 def spoken_answer(text: str) -> bool | None:
     """True = yes, False = no, None = neither (keep waiting)."""
     t = " ".join(str(text or "").split())
     if NO.match(t):
         return False
     if YES.match(t) and not re.fullmatch(r"[\s,.!]*(?:please|nova|sir)[\s,.!]*", t, re.IGNORECASE):
+        return True
+    words = re.findall(r"[a-z']+", t.lower())
+    if AFFIRM_START.match(t) and len(words) <= 6 and not NOT_A_PLAIN_YES.search(t):
         return True
     return None
 

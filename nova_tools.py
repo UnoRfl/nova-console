@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -44,6 +45,7 @@ TIERS = {
     "say": "free",
     "set_volume": "announce", "mute": "announce", "media_key": "announce",
     "focus_window": "announce", "remember": "announce",
+    "open_app": "announce", "type_text": "announce",
     "minecraft_say": "announce", "minecraft_save": "announce",
     "forget": "confirm", "close_window": "confirm",
     "lock_pc": "confirm", "sleep_pc": "confirm", "display_off": "announce",
@@ -183,6 +185,149 @@ def media_key(action: str) -> str:
 def focus_window(name: str) -> str:
     """Bring a window to the front by part of its title or app name."""
     return run_ps("Get-Windows.ps1", "-Focus", name)
+
+
+BUILTIN_APPS = {
+    "notepad": "notepad.exe", "calculator": "calc.exe", "calc": "calc.exe",
+    "paint": "mspaint.exe", "mspaint": "mspaint.exe", "file explorer": "explorer.exe",
+    "explorer": "explorer.exe", "task manager": "taskmgr.exe", "snipping tool": "SnippingTool.exe",
+    "settings": "ms-settings:", "wordpad": "write.exe",
+}
+# Never launched by open_app: a shell or system tool here is a way to run anything.
+NO_LAUNCH = re.compile(r"\b(?:cmd|command prompt|powershell|pwsh|terminal|wt|bash|wsl|regedit|registry|"
+                       r"mmc|gpedit|diskpart|msconfig|services)\b", re.IGNORECASE)
+
+
+def _start_menu() -> list[Path]:
+    roots = [Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
+             Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "Microsoft/Windows/Start Menu/Programs",
+             Path.home() / "Desktop", Path("C:/Users/Public/Desktop")]
+    found = []
+    for root in roots:
+        if root.is_dir():
+            found += [p for p in root.rglob("*") if p.suffix.lower() in (".lnk", ".url")]
+    return found
+
+
+def open_app(name: str) -> str:
+    """Open an application by name, e.g. "notepad", "spotify", "chrome", "discord".
+    Uses Windows' own built-in apps and Start Menu / desktop shortcuts. Will not
+    open a shell or system tool. Returns once the app has been launched."""
+    want = " ".join(str(name).lower().split())
+    if not want:
+        return "Which app?"
+    if NO_LAUNCH.search(want):
+        return f"I will not open {name} with this tool; shells and system tools need a job with Sir's approval."
+    target = BUILTIN_APPS.get(want)
+    if not target:
+        links = _start_menu()
+        exact = [p for p in links if p.stem.lower() == want]
+        partial = sorted((p for p in links if want in p.stem.lower()), key=lambda p: len(p.stem))
+        pick = (exact or partial or [None])[0]
+        if pick is None:
+            return f"I could not find an app called {name} in the Start Menu."
+        if NO_LAUNCH.search(pick.stem):
+            return f"{pick.stem} is a shell or system tool; I will not open it with this tool."
+        target = str(pick)
+    try:
+        os.startfile(target)                          # noqa: S606 -- a shortcut or built-in app, vetted above
+    except OSError as exc:
+        return f"Could not open {name}: {exc}"
+    if target == "notepad.exe":
+        # Windows 11 Notepad reopens his old tabs and brings the last one to
+        # the front, so anything typed next would land in some old file.
+        # Start a fresh blank tab once it is up.
+        for _ in range(30):
+            time.sleep(0.15)
+            if _foreground_process()[0] == "notepad.exe":
+                time.sleep(0.3)
+                _press(0x11, 0x4E)                    # Ctrl+N
+                time.sleep(0.4)
+                return "Opened Notepad on a new blank tab."
+        return "Opened Notepad, but it did not come to the front; focus it before typing."
+    time.sleep(1.2)                                   # let its window appear before anything types into it
+    return f"Opened {Path(target).stem if not target.endswith(':') else name}."
+
+
+def _press(*vks: int) -> None:
+    """Press a key chord, e.g. _press(0x11, 0x4E) for Ctrl+N."""
+    import ctypes
+    u = ctypes.windll.user32
+    for vk in vks:
+        u.keybd_event(vk, 0, 0, 0)
+    for vk in reversed(vks):
+        u.keybd_event(vk, 0, 2, 0)
+
+
+def _foreground_process() -> tuple[str, str]:
+    """(process exe name, window class) of the window that has focus."""
+    import ctypes
+    from ctypes import wintypes
+    u, k = ctypes.windll.user32, ctypes.windll.kernel32
+    hwnd = u.GetForegroundWindow()
+    cls = ctypes.create_unicode_buffer(256)
+    u.GetClassNameW(hwnd, cls, 256)
+    pid = wintypes.DWORD()
+    u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    exe = ""
+    h = k.OpenProcess(0x1000, False, pid.value)       # PROCESS_QUERY_LIMITED_INFORMATION
+    if h:
+        buf = ctypes.create_unicode_buffer(520)
+        size = wintypes.DWORD(520)
+        if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            exe = Path(buf.value).name.lower()
+        k.CloseHandle(h)
+    return exe, cls.value
+
+
+SHELL_WINDOWS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "wt.exe", "bash.exe",
+                 "mintty.exe", "wsl.exe", "conhost.exe", "openconsole.exe", "regedit.exe"}
+
+
+def type_text(text: str, window: str = "") -> str:
+    """Type text into a window as if from the keyboard. window: part of its title or
+    app name to bring to the front first (e.g. "notepad"); empty = the window that
+    already has focus. Line breaks become Enter. Refuses to type into a terminal."""
+    import ctypes
+    from ctypes import wintypes
+    if window:
+        run_ps("Get-Windows.ps1", "-Focus", window)
+        time.sleep(0.4)
+    exe, cls = _foreground_process()
+    if exe in SHELL_WINDOWS or cls in ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"):
+        return "The window in front is a terminal; I will not type into it."
+    if not exe:
+        return "No window has focus to type into."
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+    class INPUT(ctypes.Structure):
+        class _U(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT), ("pad", ctypes.c_byte * 32)]
+        _anonymous_ = ("u",)
+        _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+    def key(vk=0, scan=0, flags=0):
+        i = INPUT(type=1)
+        i.ki = KEYBDINPUT(vk, scan, flags, 0, 0)
+        return i
+
+    events = []
+    for ch in str(text).replace("\r\n", "\n"):
+        if ch == "\n":
+            events += [key(vk=0x0D), key(vk=0x0D, flags=2)]               # Enter
+        else:
+            raw = ch.encode("utf-16-le")                  # one or two UTF-16 units (surrogate pair)
+            for n in range(0, len(raw), 2):
+                unit = raw[n] | (raw[n + 1] << 8)
+                events += [key(scan=unit, flags=4), key(scan=unit, flags=4 | 2)]   # KEYEVENTF_UNICODE
+    arr = (INPUT * len(events))(*events)
+    sent = ctypes.windll.user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
+    if sent != len(events):
+        return f"Typing was blocked after {sent // 2} characters (the window may be running as administrator)."
+    return f"Typed {len(text)} characters into {exe.removesuffix('.exe')}."
 
 
 def close_window(name: str) -> str:
@@ -362,7 +507,7 @@ def save_routine(name: str, triggers: list[str], steps: list[dict], say: str = "
 
 
 ALL = [remind, list_reminders, cancel_reminder, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
-       mute, media_key, focus_window, close_window, display_off, lock_pc, sleep_pc,
+       mute, media_key, focus_window, open_app, type_text, close_window, display_off, lock_pc, sleep_pc,
        remember, recall, forget, day_log, say,
        server_status, minecraft_players, minecraft_say, minecraft_save,
        minecraft_start, minecraft_stop, minecraft_restart]

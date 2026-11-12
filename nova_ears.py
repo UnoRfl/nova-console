@@ -60,7 +60,9 @@ DEFAULTS = {
     "whisper_device": "auto",         # auto = GPU if it loads, else CPU
     "speaker_threshold": 0.45,        # cosine similarity needed to count as you
     "speaker_threshold_short": 0.38,  # for clips under 1.2 s, which score lower
-    "end_silence": 0.7,               # seconds of quiet that end a sentence
+    "end_silence": 0.6,               # seconds of quiet that split speech into pieces
+    "settle_seconds": 0.3,            # extra quiet before a finished-sounding request is sent
+    "unfinished_seconds": 1.3,        # extra quiet allowed when it sounds cut off ("open the...")
     "followup_seconds": 8.0,          # how long Nova keeps listening after she speaks
     "armed_seconds": 8.0,             # how long after a bare "Nova" a request may follow
     "max_sentence": 25.0,
@@ -163,6 +165,29 @@ def clean(text: str) -> str:
 def is_hallucination(text: str) -> bool:
     t = re.sub(r"[^a-z' ]", "", clean(text).lower()).strip()
     return t in HALLUCINATIONS
+
+
+# A sentence that stops on one of these has not finished. People pause to
+# think exactly here, and a pause is all the VAD needs to end the clip.
+# Only words a finished request practically never ends on: "what time is it",
+# "turn it on" and "how are you" must not be mistaken for half a sentence.
+TRAILING = {
+    "a", "an", "the", "and", "or", "but", "because", "if", "while",
+    "to", "of", "for", "with", "from", "into",
+    "my", "your", "our", "their",
+    "can", "could", "would", "should", "will", "um", "uh",
+}
+
+
+def unfinished(text: str) -> bool:
+    """Does this sound like he stopped mid-sentence?"""
+    t = clean(text)
+    if not t:
+        return False
+    if t.endswith(("...", ",", "-", "…")):
+        return True
+    words = re.sub(r"[^a-z' ]", " ", t.lower()).split()
+    return bool(words) and words[-1] in TRAILING
 
 
 def parse_wake(text: str) -> tuple[bool, str]:
@@ -316,9 +341,13 @@ class Bridge:
     def wake(self, phrase: str, utterance: str = "") -> None:
         self._call("/api/wake", {"phrase": phrase, "utterance": utterance})
 
-    def poll(self) -> dict:
-        """{pending: a follow-up was asked for, speaking: she is talking right now}"""
-        return self._call("/api/listen", timeout=2)
+    def poll(self, window: float = 0.0) -> dict:
+        """{pending: a follow-up was asked for, speaking: she is talking right now}
+
+        Also tells the bridge how much longer we are listening for, so the
+        indicator on screen says "listening" exactly while that is true.
+        """
+        return self._call(f"/api/listen?window={max(0.0, window):.2f}", timeout=2)
 
     def answer(self, allow: bool) -> None:
         self._call("/api/permission/answer", {"allow": allow, "by": "voice"})
@@ -340,7 +369,16 @@ class Ears:
         self.followup_until = 0.0     # Nova just spoke; no wake word needed
         self.nova_speaking = False    # she is talking; your voice now means "stop"
         self.approval_pending = False # she asked "shall I ...?" and is waiting
+        self.held: dict | None = None # a request waiting a moment in case he carries on
+        self.engaged_until = 0.0      # he is mid-sentence inside a window: still listening
         self.stats = {"segments": 0, "not_you": 0, "no_wake": 0, "requests": 0}
+
+    def window_left(self, now: float) -> float:
+        """Seconds of listening still to run, for the on-screen indicator."""
+        left = max(self.armed_until, self.followup_until, self.engaged_until) - now
+        if self.held is not None:
+            left = max(left, 1.0)
+        return max(0.0, left)
 
     # One decision per speech segment. Returns a dict describing what happened,
     # which the replay test reads and the live loop logs.
@@ -382,9 +420,17 @@ class Ears:
                 out.update(action="answer", text=text, allow=verdict,
                            why="approved" if verdict else "refused")
                 return out
+            # Not a clear yes or no. Log what was heard so a missed answer
+            # can be diagnosed -- he was talking to her, so this is fair game.
+            log(f"while she waits for yes/no, heard (not an answer): {text!r}")
 
         # 4. Was it for Nova?
-        listening = now < self.armed_until or now < self.followup_until
+        # A window is judged by when he STARTED speaking, not when he stopped.
+        # `now` is the end of the clip, so a long request begun inside the
+        # window used to finish outside it and be thrown away whole.
+        started = now - dur - float(self.cfg["end_silence"])
+        in_followup = started < self.followup_until
+        listening = started < self.armed_until or in_followup or self.held is not None
         woke, rest = parse_wake(text)
 
         if woke and len(rest) >= 2:
@@ -394,7 +440,8 @@ class Ears:
             out.update(action="armed", text=text, why="name only -- waiting for the request")
         elif listening:
             out.update(action="request", request=text, text=text,
-                       why="follow-up" if now < self.followup_until else "after name")
+                       why="follow-up" if in_followup else
+                           ("after name" if started < self.armed_until else "carried on"))
         else:
             self.stats["no_wake"] += 1
             out["why"] = "your voice, but not addressed to Nova"
@@ -407,6 +454,65 @@ class Ears:
             self.followup_until = 0.0
             self.stats["requests"] += 1
         return out
+
+    # A request is not sent the instant the VAD ends the clip. People pause
+    # mid-sentence, and the pause used to send half a request and discard the
+    # rest. So a request is held for a moment -- briefly if it sounds finished,
+    # longer if it trails off on "and" or "the" -- and anything he adds in that
+    # time is joined on before it goes.
+    def take(self, d: dict, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        h = self.held
+        if d["action"] == "request":
+            parts = 1
+            if h is not None:
+                d["request"] = clean(h["request"] + " " + d["request"])
+                d["why"] = h["why"] if "carried on" in h["why"] else h["why"] + " + carried on"
+                d["first_held"] = h["first_held"]
+                parts = h["parts"] + 1
+                self.stats["requests"] -= 1           # still one request, not two
+            d["parts"] = parts
+            d.setdefault("first_held", now)
+            wait = float(self.cfg["unfinished_seconds"] if unfinished(d["request"])
+                         else self.cfg["settle_seconds"])
+            if wait <= 0 or parts >= 5 or now - d["first_held"] > float(self.cfg["max_sentence"]):
+                self.held = None
+                self.act(d)
+            else:
+                d["until"] = now + wait
+                self.held = d
+            return
+        if h is not None and d["action"] == "armed":
+            self.armed_until = 0.0                    # her name again, mid-request: nothing new
+            return
+        self.act(d)
+
+    def release_due(self, speech: bool, speech_run: int, recent: np.ndarray,
+                    now: float | None = None) -> None:
+        """Send the held request once he has clearly stopped."""
+        h = self.held
+        now = time.time() if now is None else now
+        if h is None or now < h["until"]:
+            return
+        if speech and now - h["until"] < float(self.cfg["max_sentence"]):
+            # Someone is speaking. If it is him, the sentence is still going
+            # and the next clip will be joined on. If it is the television,
+            # do not let it hold the request hostage.
+            if speech_run < 19:
+                return                                # too little to judge yet
+            if self.speaker.print is None:
+                if now - h["until"] < 2.5:
+                    return
+            else:
+                if now >= h.get("recheck", 0.0):
+                    h["recheck"] = now + 0.3
+                    score = self.speaker.score(recent[-int(RATE * 0.8):])
+                    h["his"] = (score is not None
+                                and score >= self.cfg["speaker_threshold_short"])
+                if h.get("his"):
+                    return
+        self.held = None
+        self.act(h)
 
     def act(self, d: dict) -> None:
         if d["action"] == "answer":
@@ -431,48 +537,85 @@ class Ears:
         import sounddevice as sd
 
         vad = make_vad(self.cfg)
-        q: queue.Queue = queue.Queue()
-        gain = Gain(self.cfg.get("input_gain", 1.0))
-
-        def on_audio(indata, frames, t, status):      # audio thread: just hand off
-            q.put(gain(indata[:, 0].copy()))
+        q: queue.Queue = queue.Queue()                # the audio thread only hands off
+        self.gain = Gain(self.cfg.get("input_gain", 1.0))
+        self.in_window = False
 
         def poll_followup() -> None:
             # The HUD asks for a follow-up when it finishes speaking.
             while True:
-                state = self.bridge.poll()
-                self.nova_speaking = bool(state.get("speaking"))
-                self.approval_pending = bool(state.get("approval"))
-                if state.get("pending"):
-                    self.followup_until = time.time() + float(self.cfg["followup_seconds"])
-                    log("follow-up window open", quiet=True)
+                try:
+                    state = self.bridge.poll(self.window_left(time.time()))
+                    self.nova_speaking = bool(state.get("speaking"))
+                    self.approval_pending = bool(state.get("approval"))
+                    if state.get("pending"):
+                        self.followup_until = time.time() + float(self.cfg["followup_seconds"])
+                        log("follow-up window open", quiet=True)
+                except Exception as exc:              # noqa: BLE001 - this thread must outlive any one bad poll
+                    log(f"poll failed: {type(exc).__name__}: {exc}", quiet=True)
                 time.sleep(0.25)
 
         threading.Thread(target=poll_followup, daemon=True).start()
 
         dev = self.cfg.get("input_device")
-        info = sd.query_devices(dev, "input")
-        log(f"ears up -- mic '{info['name']}' (gain {self.cfg.get('input_gain', 1.0)}), whisper {self.whisper.name} on "
-            f"{self.whisper.device}, voiceprint "
-            f"{'enrolled' if self.speaker.print is not None else 'NOT ENROLLED (anyone can wake her)'}")
-        for note in self.whisper.notes:
-            log(f"  note: {note}")
+        first = True
+        while True:
+            try:
+                info = sd.query_devices(dev, "input")
+                if first:
+                    log(f"ears up -- mic '{info['name']}' (gain {self.cfg.get('input_gain', 1.0)}), "
+                        f"whisper {self.whisper.name} on {self.whisper.device}, voiceprint "
+                        f"{'enrolled' if self.speaker.print is not None else 'NOT ENROLLED (anyone can wake her)'}")
+                    for note in self.whisper.notes:
+                        log(f"  note: {note}")
+                else:
+                    log(f"microphone reopened -- '{info['name']}'")
+                first = False
+                self.hear(sd, dev, vad, q)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:                  # noqa: BLE001
+                log(f"microphone trouble ({type(exc).__name__}: {str(exc)[:120]}) -- retrying in 3 s")
+            # A wireless mic that drops out stops delivering audio without any
+            # error. Reopen it rather than sit deaf until the next restart.
+            time.sleep(3)
+            while not q.empty():
+                q.get_nowait()
+            vad = make_vad(self.cfg)
 
+    def hear(self, sd, dev, vad, q: "queue.Queue") -> None:
+        """Run the microphone until it goes quiet in the way a dead device does."""
         buf = np.zeros(0, dtype=np.float32)
-        recent = np.zeros(0, dtype=np.float32)       # the last second, for talk-over
+        recent = np.zeros(RATE, dtype=np.float32)    # the last second, for talk-over
         speech_run = 0                                # consecutive frames of speech
         barged = False
         with sd.InputStream(samplerate=RATE, channels=1, dtype="float32",
-                            blocksize=WINDOW, device=dev, callback=on_audio):
+                            blocksize=WINDOW, device=dev,
+                            callback=lambda indata, frames, t, status: q.put(
+                                self.gain(indata[:, 0].copy()))):
             while True:
-                buf = np.concatenate([buf, q.get()])
+                try:
+                    buf = np.concatenate([buf, q.get(timeout=5)])
+                except queue.Empty:
+                    log("microphone stopped delivering audio -- reopening it")
+                    return
                 while len(buf) >= WINDOW:
                     frame = buf[:WINDOW]
                     vad.accept_waveform(frame)
                     buf = buf[WINDOW:]
-                    recent = np.concatenate([recent, frame])[-RATE:]
+                    recent = np.roll(recent, -WINDOW)
+                    recent[-WINDOW:] = frame
                     if vad.is_speech_detected():
                         speech_run += 1
+                        if speech_run == 1:
+                            # Did he start inside a listening window? Then the
+                            # indicator stays on "listening" until he is done,
+                            # however long the sentence runs past the window.
+                            now = time.time()
+                            self.in_window = (now < max(self.armed_until, self.followup_until)
+                                              or self.held is not None)
+                        if self.in_window:
+                            self.engaged_until = time.time() + 1.5
                     else:
                         speech_run, barged = 0, False
 
@@ -480,9 +623,11 @@ class Ears:
                     # voice stops her mid-sentence, and whatever you are saying
                     # is taken as the next request with no wake word. It needs
                     # the voiceprint: without one, her own voice coming back
-                    # through the speakers would interrupt her.
+                    # through the speakers would interrupt her. Scored every
+                    # quarter second, not every frame -- the speaker model on
+                    # every 32 ms frame was enough to make the ears fall behind.
                     if (self.nova_speaking and not self.approval_pending
-                            and not barged and speech_run >= 19
+                            and not barged and speech_run >= 19 and (speech_run - 19) % 8 == 0
                             and self.speaker.print is not None):
                         score = self.speaker.score(recent[-int(RATE * 0.8):])
                         if score is not None and score >= self.cfg["speaker_threshold_short"]:
@@ -494,9 +639,14 @@ class Ears:
                     seg = np.asarray(vad.front.samples, dtype=np.float32)
                     vad.pop()
                     try:
-                        self.act(self.decide(seg))
+                        self.take(self.decide(seg))
                     except Exception as exc:          # noqa: BLE001 - never die on one clip
                         log(f"segment failed: {type(exc).__name__}: {exc}")
+                try:
+                    self.release_due(vad.is_speech_detected(), speech_run, recent)
+                except Exception as exc:              # noqa: BLE001
+                    self.held = None
+                    log(f"release failed: {type(exc).__name__}: {exc}")
 
     # -------------------------------------------------------------- files
     def run_file(self, path: Path) -> list[dict]:
