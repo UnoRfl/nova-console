@@ -253,16 +253,19 @@ class Hands:
         raise LookupError(f"nothing on the page matches {t!r}; use a number from web_read")
 
     # -------------------------------------------------------------- actions
-    def do_open(self, url: str) -> dict:
+    def do_open(self, url: str, show: bool = False) -> dict:
         if not re.match(r"^[a-z]+://", url) and not url.startswith(("about:", "chrome:")):
             url = "https://" + url
         page = self.page()
         page.goto(url, wait_until="domcontentloaded")
         self._current = page
-        return self._snapshot(page)
+        out = self._snapshot(page)
+        if show:
+            out["note"] = "On Sir's screen, in front." if self.do_show(True).get("front") else "Shown on screen."
+        return out
 
-    def do_search(self, query: str) -> dict:
-        return self.do_open("https://www.google.com/search?hl=en&q=" + urllib.parse.quote_plus(query))
+    def do_search(self, query: str, show: bool = False) -> dict:
+        return self.do_open("https://www.google.com/search?hl=en&q=" + urllib.parse.quote_plus(query), show)
 
     def do_read(self, max_chars: int = MAX_TEXT) -> dict:
         return self._snapshot(self.page(), int(max_chars))
@@ -330,9 +333,56 @@ class Hands:
         win = cdp.send("Browser.getWindowForTarget")["windowId"]
         cdp.send("Browser.setWindowBounds", {"windowId": win,
                                              "bounds": {"windowState": "normal" if visible else "minimized"}})
+        front = False
         if visible:
             page.bring_to_front()
-        return {"visible": visible, "url": page.url}
+            front = self._to_foreground(page)
+        return {"visible": visible, "front": front, "url": page.url}
+
+    def _to_foreground(self, page) -> bool:
+        """Put her Chrome window in front of everything else. Chrome cannot do
+        this itself (Windows' foreground lock), so find the window by a marker
+        title and raise it with the Alt-key trick."""
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        marker = f"NOVA-FRONT-{int(time.time() * 1000)}"
+        try:
+            old = page.evaluate("t => { const o = document.title; document.title = t; return o; }", marker)
+        except Exception:                             # noqa: BLE001
+            return False
+        found = []
+        proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def cb(hwnd, _l):
+            buf = ctypes.create_unicode_buffer(512)
+            u.GetWindowTextW(hwnd, buf, 512)
+            if marker in buf.value:
+                found.append(hwnd)
+                return False
+            return True
+        for _ in range(20):                           # the title takes a moment to reach the window
+            u.EnumWindows(proc(cb), 0)
+            if found:
+                break
+            time.sleep(0.05)
+        try:
+            page.evaluate("t => { document.title = t; }", old)
+        except Exception:                             # noqa: BLE001
+            pass
+        if not found:
+            return False
+        hwnd = found[0]
+        SW_RESTORE, VK_MENU, KEYUP = 9, 0x12, 0x0002
+        if u.IsIconic(hwnd):
+            u.ShowWindow(hwnd, SW_RESTORE)
+        u.keybd_event(VK_MENU, 0, 0, 0)               # a key press grants foreground rights
+        u.keybd_event(VK_MENU, 0, KEYUP, 0)
+        u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)  # HWND_TOPMOST, no move/size
+        u.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003)  # back to normal, but now on top
+        u.BringWindowToTop(hwnd)
+        u.SetForegroundWindow(hwnd)
+        return u.GetForegroundWindow() == hwnd
 
     # ------------------------------------------------------ Messenger (read-only)
     def _messenger(self):

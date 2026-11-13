@@ -558,15 +558,21 @@ in plain spoken prose with no markdown, lists, emoji or code.
 You are the light-conversation side of Nova, running on a small model on his own PC to
 save his allowance: chat, banter, jokes, opinions, explanations and general knowledge.
 Requests that need you to check or do something are sent to your bigger engines
-automatically, so you will rarely see them. If one does reach you, do not pretend: say
-in one sentence that he should ask again starting with "use haiku" and you will handle
-it properly. Never invent a result, a status, a time or a number about his computer or
-the outside world.
+automatically, so you will rarely see them. If one does reach you, reply with exactly
+the single word ESCALATE and nothing else: that hands it straight to a bigger engine
+that has tools. Never tell him to say "use haiku" and never say you are a small model.
+Never invent a result, a status, a time or a number about his computer or the outside
+world.
 
 YOU HAVE NO TOOLS AND CANNOT DO ANYTHING ON THE PC. Never say you have done, removed,
-closed, opened, moved, changed, fixed or will do anything: you cannot, and saying so is
-a lie he will catch. If he asks you to do something, say only that you cannot do that
-from this small model and he should say "use haiku" first."""
+closed, opened, moved, changed, fixed or will do anything. If he asks you to do, open,
+show, check, find, move or look at anything, or asks why you did not, reply ESCALATE."""
+
+# What the routed local model says when a request needs a bigger engine.
+ESCALATE_WORD = re.compile(r"^\W*escalate\b", re.I)
+# A small model that ignores that and refuses anyway also gets passed up.
+LOCAL_REFUSAL = re.compile(r"\b(?:small model|use haiku|say \"?use haiku|can(?:no|')t do (?:that|this|it) "
+                           r"from|(?:don'?t|do not) have (?:the )?(?:tools|access)|unable to (?:do|open|access))\b", re.I)
 
 CODEX_BRIEF = """You are NOVA, the voice assistant of the man whose PC you run on, answering
 through the Codex engine. Address him as "Sir". Your reply is read aloud: one to three
@@ -1463,6 +1469,10 @@ class Backend:
                                       ({"role": "user", "content": x["user"][:600]},
                                        {"role": "assistant", "content": x["reply"][:600]})]
                 out = self.ask_local(prompt, local, speak, routed=claude_ok)
+                if out.get("error") == "escalate":
+                    tier, how = "normal", how + "+escalated"
+                    plan.extend([p for p in self.router.plan("normal", claude_ok, self.codex_ready(), False)
+                                 if p[0] != "local" and p not in plan])
             if "error" in out:
                 continue
             self.brain = engine
@@ -1567,13 +1577,27 @@ class Backend:
             self.local_history = self.local_history[-12:]
             parts: list[str] = []
 
+            # Routed: hold the (short) reply until it is whole, so an ESCALATE or
+            # a "I'm only a small model" refusal is passed up, never spoken.
+            hold = routed and not public
+
             def on_delta(text: str) -> None:
                 parts.append(text)
-                if self.streamer:
+                if self.streamer and not hold:
                     self.streamer.push(text)
 
             err = nova_harness.ollama_chat(model, [{"role": "system", "content": system}]
                                            + self.local_history, on_delta)
+            whole = "".join(parts).strip()
+            if hold and not err and (ESCALATE_WORD.match(whole) or LOCAL_REFUSAL.search(whole)):
+                self.local_history.pop()
+                if self.speech:
+                    self.speech.close()
+                self.speech = self.streamer = None
+                log(f"local model passed it up: {whole[:80]!r}")
+                return {"error": "escalate", "detail": "needs a bigger engine"}
+            if self.streamer and hold:
+                self.streamer.push(whole)
             if self.streamer:
                 self.streamer.flush()
             spoken = bool(self.streamer and self.streamer.count)

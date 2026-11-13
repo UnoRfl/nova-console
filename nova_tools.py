@@ -717,18 +717,21 @@ def _page(r: dict, src: str = "") -> str:
     return head + "\n".join(out)
 
 
-def web_search(query: str) -> str:
+def web_search(query: str, show: bool = False) -> str:
     """Search Google in Nova's own Chrome and read the results page. Prefer this over
     WebSearch when Sir wants something looked up the way he would. Result elements are
-    numbered: web_click a number to open one."""
-    return _page(_hands("search", query=query))
+    numbered: web_click a number to open one. When he wants something ON HIS SCREEN
+    (lyrics, a page, a video), do not stop at the Google results: web_click the best
+    result so the real page is open, then web_show to put it in front of his windows."""
+    return _page(_hands("search", query=query, show=show))
 
 
-def web_open(url: str) -> str:
+def web_open(url: str, show: bool = False) -> str:
     """Open a URL in Nova's own Chrome and read it (text + numbered clickable elements).
     If Sir closed her Chrome it reopens by itself: just call this, never tell him the
-    browser is closed. To put it on his screen, follow with web_show."""
-    return _page(_hands("open", url=url))
+    browser is closed. show=true also brings the window in front of his other windows:
+    use it whenever he wants to see the page ("get it up", "on my screen", "show me")."""
+    return _page(_hands("open", url=url, show=show))
 
 
 def web_read(max_chars: int = 6000) -> str:
@@ -774,10 +777,15 @@ def web_screenshot() -> str:
 
 
 def web_show(visible: bool = True) -> str:
-    """Bring Nova's Chrome window up on screen (so Sir can sign in to a site, or deal with
-    a captcha), or minimise it again with visible=false."""
+    """Bring Nova's Chrome window in front of all Sir's other windows (to read a page, sign
+    in, deal with a captcha), or minimise it with visible=false. Use it whenever he says
+    he can't see it, or asks to put it in front / on his screen."""
     r = _hands("show", visible=visible)
-    return r.get("error") or ("Her browser is on screen." if visible else "Her browser is minimised.")
+    if r.get("error"):
+        return "Error: " + r["error"]
+    if not visible:
+        return "Her browser is minimised."
+    return "Her browser is in front on his screen." if r.get("front") else         "Her browser is restored, but Windows kept another window in front."
 
 
 def messenger_chats(limit: int = 15) -> str:

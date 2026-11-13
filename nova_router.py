@@ -109,7 +109,7 @@ TOOLS = re.compile(_words(
     r"tab", r"window", r"panel", r"monitor", r"display", r"do it", r"did you",
     # Putting something on his screen, or asking her to just do it.
     r"in front", r"to the front", r"bring (?:it|that|this|them)? ?(?:up|forward|back)", r"pull (?:it|that)? ?up",
-    r"put (?:it|that|this) (?:up|on|in)", r"can'?t see", r"cannot see", r"don'?t see", r"show",
+    r"put (?:it|that|this) (?:up|on|in)", r"can'?t see", r"cannot see", r"don'?t see", r"show (?:it|that|this|the)",
     r"lyrics", r"automatically", r"for me", r"do (?:that|this)", r"handle it"))
 
 # 3b'. Driving the PC: opening apps, typing, pressing keys. One or two tool
