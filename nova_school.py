@@ -47,7 +47,7 @@ DEFAULTS = {
     "page_minutes": 20,          # how often the Facebook pages are read (4am-11pm)...
     "busy_minutes": 5,           # ...and this often in the busy hours, so he hears before school
     "busy_hours": "06:00-12:00",
-    "announce_all_posts": True,  # say every new post on those pages, not only notices
+    "announce_all_posts": False, # Sir: posts only when he asks; suspensions/holidays still spoken
     "search_minutes": 60,        # how often Google is asked (kept low: captchas)
     "morning": "05:30",          # "no school today" is said from this time on
     "evening": "20:00",          # "no school tomorrow" heads-up
@@ -104,12 +104,14 @@ def load_state() -> dict:
     s.setdefault("said", {})             # "today|2026-11-30" -> True
     s.setdefault("last_pages", 0)
     s.setdefault("last_search", 0)
+    s.setdefault("posts", [])            # new page posts, kept for when he asks
     return s
 
 
 def save_state(s: dict) -> None:
     s["seen"] = s["seen"][-1500:]
     s["notices"] = s["notices"][-60:]
+    s["posts"] = s.get("posts", [])[-80:]
     cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 40 * 86400))
     s["no_school"] = {d: r for d, r in s["no_school"].items() if d >= cutoff}
     s["said"] = {k: v for k, v in s["said"].items() if k.split("|")[-1] >= cutoff}
@@ -405,6 +407,8 @@ def gather(read, now: float | None = None, force: bool = False) -> dict:
                 continue
             s["seen"].append(fp)
             new_posts.append(it)
+            s["posts"].append({"at": now, "source": it["source"], "stamp": it["stamp"],
+                               "headline": it["headline"], "text": it["text"][:800]})
         save_state(s)
     return {"worthy": new, "posts": new_posts}
 
@@ -442,6 +446,16 @@ def recent_notices(hours: float = 72) -> list[str]:
             seen.add(n["text"][:200])
             out.append(f"{n['source']}{(' (' + n['stamp'] + ')') if n.get('stamp') else ''}: {n['text'][:300]}")
     return out[-10:]
+
+
+def recent_posts(hours: float = 48, source: str = "") -> list[str]:
+    """New posts seen on the watched pages, newest first, for when he asks."""
+    cutoff = time.time() - hours * 3600
+    out = []
+    for p in reversed(load_state()["posts"]):
+        if p["at"] >= cutoff and source.lower() in p["source"].lower():
+            out.append(f"{p['source']} ({p['stamp'] or 'recent'}): {p['text'][:400]}")
+    return out[:12]
 
 
 def mark_said(key: str) -> bool:

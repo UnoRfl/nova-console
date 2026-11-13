@@ -642,7 +642,9 @@ def school_days(days_ahead: int = 30, check_now: bool = False) -> str:
     school notices from the his school and his city Facebook pages and the
     past day's Google news on "walang pasok". Use for "is there school today/tomorrow",
     "any class suspension", "next holiday", "anything from his school". check_now=true reads
-    the pages right away (slower) instead of using what the background watcher saw."""
+    the pages right away (slower) instead of using what the background watcher saw.
+    Also lists new posts on those pages: Sir hears about posts only when he asks
+    ("anything new from his school?", "what did the city post?"), so tell him then, briefly."""
     import time
     import nova_school
     out = []
@@ -657,8 +659,12 @@ def school_days(days_ahead: int = 30, check_now: bool = False) -> str:
     up = nova_school.upcoming(max(1, min(int(days_ahead), 400)))
     out.append(f"Next {days_ahead} days: " + ("; ".join(up) if up else "none."))
     notes = nova_school.recent_notices()
+    posts = nova_school.recent_posts()
+    out.append(UNTRUSTED.format(src="Facebook / Google"))
     if notes:
-        out.append(UNTRUSTED.format(src="Facebook / Google") + "Recent notices:\n" + "\n".join(notes))
+        out.append("Recent school notices:\n" + "\n".join(notes))
+    out.append("New posts on the school / city pages (last 48 h):\n" +
+               ("\n".join(posts) if posts else "none since she started watching."))
     return "\n".join(out)
 
 
