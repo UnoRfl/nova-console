@@ -44,6 +44,11 @@ import nova_router  # noqa: E402
 import nova_initiative  # noqa: E402
 import nova_schedule  # noqa: E402
 
+try:                        # "play X on Spotify" with no model (nova_spotify.py)
+    import nova_spotify
+except Exception:           # noqa: BLE001
+    nova_spotify = None
+
 try:                        # Nova's own voice. Optional: without it the HUD
     import nova_voice       # falls back to the browser's speech synthesis.
 except Exception:           # noqa: BLE001 -- a missing package must not stop the bridge
@@ -2786,6 +2791,21 @@ class Handler(BaseHTTPRequestHandler):
                 spoken = self.server.speak_now(ack) if body.get("speak") else False
                 self.send_json({"text": ack, "ms": 0, "turns": 0, "denials": 0,
                                 "remembered": [], "ack": True, "spoken": spoken,
+                                "memories": len(load_memories(limit=10_000))})
+                return
+
+            # "Play SOS by SZA on Spotify" / "play the album Abbey Road": no
+            # model needed, and the reply is what Spotify actually shows playing.
+            music = nova_spotify.parse_request(prompt) if nova_spotify else None
+            if music:
+                query, kind = music
+                log(f"spotify (no model): {kind} {query[:80]}")
+                self.server.activity.push("system", "Spotify", f"{kind}: {query[:100]}")
+                text = nova_spotify.play_in_child(query, kind)
+                log(f"spotify: {text[:120]}")
+                spoken = self.server.speak_now(text) if body.get("speak") else False
+                self.send_json({"text": text, "ms": 0, "turns": 0, "denials": 0,
+                                "remembered": [], "spotify": True, "spoken": spoken,
                                 "memories": len(load_memories(limit=10_000))})
                 return
 

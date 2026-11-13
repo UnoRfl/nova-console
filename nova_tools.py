@@ -63,6 +63,7 @@ TIERS = {
     "open_loops": "free", "close_loop": "announce",
     "look_at_this": "free", "presence": "free",
     "class_schedule": "free", "school_days": "free", "stock_quote": "free",
+    "spotify_play": "announce",
     # Hands. Looking and reading are free. Driving her own sandboxed Chrome is
     # "announce". Driving Sir's real desktop is "confirm": allowed while
     # ask_first is off, but refused by the gate once she has read untrusted
@@ -1006,6 +1007,16 @@ def whatsapp_read(chat: str, max_chars: int = 3000) -> str:
     return _desk("whatsapp_read", chat, max_chars, src="WhatsApp")
 
 
+def spotify_play(query: str, kind: str = "auto") -> str:
+    """Play music in Sir's Spotify app (opens it if closed). query: what he said, e.g.
+    "blinding lights the weeknd", "SOS by SZA", "lofi beats". kind: "track" (a song),
+    "album", "playlist", "artist", or "auto" (a song unless the words say album/playlist).
+    Uses Spotify's own search, presses Play, and reports what is actually playing. For
+    pause / next / previous use media_key instead."""
+    import nova_spotify
+    return nova_spotify.play_in_child(str(query), str(kind or "auto"))
+
+
 def desktop_look(window: str = "") -> str:
     """Numbered list of the buttons, menus, tabs and text boxes in a window (default: the one
     in front). Use it before desktop_click / desktop_type. Works in any normal Windows app,
@@ -1057,7 +1068,7 @@ def open_settings(page: str = "") -> str:
 
 ALL = [class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read, gmail_send, gmail_reply,
-       whatsapp_chats, whatsapp_read, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
+       whatsapp_chats, whatsapp_read, spotify_play, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
        remind, list_reminders, cancel_reminder, schedule_meeting, list_meetings, cancel_meeting, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
@@ -1113,7 +1124,8 @@ def approve(tool_name: str, input: dict, tool_use_id: str = "") -> str:
 
 # Still allowed after reading untrusted content: her own sandboxed browser
 # (Messenger/Gmail/Facebook are hard read-only in nova_hands), and harmless notes.
-TAINT_OK = {"web_click", "web_type", "web_keys", "open_settings", "remember", "remind", "say"}
+TAINT_OK = {"web_click", "web_type", "web_keys", "open_settings", "remember", "remind", "say",
+            "spotify_play"}
 
 
 def tier(name: str) -> str:
