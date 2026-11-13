@@ -295,7 +295,7 @@ class Hands:
     def do_read(self, max_chars: int = MAX_TEXT) -> dict:
         return self._snapshot(self.page(), int(max_chars))
 
-    def do_click(self, target: str) -> dict:
+    def do_click(self, target: str, show: bool = False) -> dict:
         page = self.page()
         self._guard(page, "Clicking")
         before = len(self.browser().pages)
@@ -305,7 +305,11 @@ class Hands:
         if len(pages) > before:                       # it opened a new tab: follow it
             self._current = pages[-1]
             page = pages[-1]
-        return self._snapshot(page)
+        out = self._snapshot(page)
+        if show:                                      # the new tab goes in front, not behind his windows
+            page.bring_to_front()
+            self._to_foreground(page)
+        return out
 
     def do_type(self, target: str, text: str, enter: bool = False) -> dict:
         page = self.page()

@@ -1045,8 +1045,13 @@ def describe_tool(name: str, params: dict) -> str:
 REMIND_ME = re.compile(r"^\s*(?:nova\b[\s,]*)?(?:please\s+)?remind me\s+(?:to\s+|that\s+|about\s+)?(.+)$",
                        re.IGNORECASE | re.DOTALL)
 REMIND_STRIP = re.compile(
-    r"\b(?:in\s+(?:\d+|an?|half an)\s*(?:second|sec|minute|min|hour|hr)s?"
-    r"|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|every ?day|daily|each day|every morning|every night)\b",
+    r"\b(?:in\s+(?:\d+|an?|half an)\s*(?:second|sec|minute|min|hour|hr|day|week)s?"
+    r"|(?:at|by|around)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)"
+    r"|every ?day|daily|each day|every morning|every night"
+    r"|(?:on\s+)?(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+of)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s+20\d\d)?"
+    r"|(?:on\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+20\d\d)?"
+    r"|(?:on\s+)?the\s+\d{1,2}(?:st|nd|rd|th)|(?:the\s+)?day after tomorrow|tomorrow|tonight|today"
+    r"|(?:in the\s+|this\s+)?(?:morning|afternoon|evening)|noon|midnight)\b",
     re.IGNORECASE)
 
 
@@ -2245,19 +2250,39 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/reminders":
-            when = nova_events.parse_when(str(body.get("when") or ""))
-            if not when:
-                self.send_json({"error": "I could not work out when. Say 'in 20 minutes' or 'at 17:30'."})
+            # Exact fields first (date "2026-11-16", time "09:00"), else words.
+            import nova_when
+            date, clock, words = (str(body.get(k) or "").strip() for k in ("date", "time", "when"))
+            r = (nova_when.from_fields(date, clock) if (date or clock) else None) or nova_when.parse(words)
+            if not r:
+                self.send_json({"error": "I could not work out when. Give date as YYYY-MM-DD and time as "
+                                         "HH:MM, or words like 'on the 16th of November at 9am'."})
                 return
+            if r["at"] <= time.time() + 5:
+                self.send_json({"error": "That time has already passed: " + nova_when.describe(r["at"])})
+                return
+            weekly = body.get("weekly_on")
+            if weekly in (None, "", False):
+                weekly = r["weekly"]
+            elif str(weekly).isdigit():
+                weekly = int(weekly)
+            else:
+                weekly = nova_when.WEEKDAYS.get(str(weekly).lower()[:3])
+            daily = time.strftime("%H:%M", time.localtime(r["at"])) if body.get("daily") else r["daily"]
             item = self.server.events.reminders.add(
-                str(body.get("text") or ""), when[0],
-                when[1] if not body.get("daily") else time.strftime("%H:%M", time.localtime(when[0])),
-                "ask" if body.get("as_request") else "say")
+                str(body.get("text") or ""), r["at"], daily, "ask" if body.get("as_request") else "say",
+                weekly=weekly, group=str(body.get("group") or ""), title=str(body.get("title") or ""))
+            item["described"] = nova_when.describe(r["at"])
+            log(f"reminder {item['id']} for {item['described']}: {item['text'][:80]}")
             self.send_json(item)
             return
 
         if route == "/api/reminders/cancel":
-            self.send_json({"cancelled": self.server.events.reminders.cancel(str(body.get("which") or ""))})
+            gone = self.server.events.reminders.cancel(str(body.get("which") or ""),
+                                                       bool(body.get("include_repeating")))
+            for g in gone:
+                log(f"reminder {g['id']} cancelled: {g['text'][:80]}")
+            self.send_json({"cancelled": gone})
             return
 
         if route == "/api/orders":
@@ -2638,13 +2663,23 @@ class Handler(BaseHTTPRequestHandler):
             # "Remind me ..." is likewise handled here, so a reminder never
             # depends on the model deciding to set one.
             m = REMIND_ME.match(prompt)
-            when = nova_events.parse_when(prompt) if m else None
+            import nova_when
+            parsed = nova_when.parse(prompt) if m else None
+            # Only with a clock time named: "remind me to tell mom about Saturday"
+            # is not a reminder for Saturday 9am. Date-only asks go to the model,
+            # which sets them with the exact-date tool.
+            when = (parsed["at"], parsed["daily"]) if parsed and parsed["timed"] and not parsed["weekly"] else None
             if m and when:
                 what = REMIND_STRIP.sub("", m.group(1)).strip(" ,.") or "what you asked"
+                what = " ".join(what.split())
                 item = events.reminders.add(what, when[0], when[1])
                 at = time.strftime("%H:%M", time.localtime(item["at"]))
-                text = (f"Very good, Sir. I shall remind you {'every day ' if when[1] else ''}at {at}.")
-                log(f"reminder set for {at}{' daily' if when[1] else ''}: {what[:100]}")
+                said_day = time.strftime("%A %d %B", time.localtime(item["at"])).replace(" 0", " ")
+                same_day = time.strftime("%Y%m%d", time.localtime(item["at"])) == time.strftime("%Y%m%d")
+                text = ("Very good, Sir. I shall remind you every day at " + at + "." if when[1] else
+                        f"Very good, Sir. I shall remind you at {at}." if same_day else
+                        f"Very good, Sir. I shall remind you on {said_day} at {at}.")
+                log(f"reminder set for {nova_when.describe(item['at'])}{' daily' if when[1] else ''}: {what[:100]}")
                 spoken = self.server.speak_now(text) if body.get("speak") else False
                 self.send_json({"text": text, "ms": 0, "turns": 0, "denials": 0, "remembered": [],
                                 "spoken": spoken, "memories": len(load_memories(limit=10_000))})

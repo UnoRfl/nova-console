@@ -53,6 +53,7 @@ TIERS = {
     "minecraft_start": "announce",
     "list_reminders": "free", "list_routines": "free",
     "remind": "announce", "cancel_reminder": "announce", "run_routine": "announce",
+    "schedule_meeting": "announce", "cancel_meeting": "announce", "list_meetings": "free",
     "save_routine": "confirm",    # a new standing behaviour: Sir approves it first
     "list_jobs": "free", "job_result": "free", "engines_available": "free",
     "cancel_job": "announce",
@@ -489,29 +490,137 @@ def engines_available() -> str:
     return json.dumps(r.get("engines") or {})
 
 
-def remind(text: str, when: str, daily: bool = False, as_request: bool = False) -> str:
-    """Set a reminder. when is like "in 20 minutes" or "at 17:30". With as_request,
-    the text is run as a request to Nova at that time instead of merely being spoken
-    (for example "check whether the render finished and tell me")."""
-    r = bridge("/api/reminders", {"text": text, "when": when, "daily": daily, "as_request": as_request})
+def remind(text: str, date: str = "", time: str = "", when: str = "", daily: bool = False,
+           weekly_on: str = "", as_request: bool = False) -> str:
+    """Set a reminder. text is what she will SAY then, e.g. "Sir, the swimming trip is today."
+    Give the moment EXACTLY: date "YYYY-MM-DD" and time "HH:MM" (24-hour). Work the date out
+    yourself from today's date ("the 16th" -> this month's 16th, "Monday" -> the coming Monday).
+    No time given by Sir -> use "09:00". when= free words ("in 20 minutes", "on the 16th of
+    November at 9am") is a fallback. daily=true repeats every day; weekly_on="monday" every week.
+    with as_request, the text is run as a request to Nova at that time instead of spoken.
+    The reply states the exact day it was stored for: check it matches what Sir asked, and
+    tell him that day and time. Do not set the same reminder twice."""
+    import time as _t
+    r = bridge("/api/reminders", {"text": text, "date": date, "time": time, "when": when, "daily": daily,
+                                  "weekly_on": weekly_on, "as_request": as_request})
     if r.get("error"):
-        return r["error"]
-    import time
-    return "Reminder set for " + time.strftime("%H:%M", time.localtime(r["at"])) + (" daily." if r.get("daily") else ".")
+        return "Not set: " + r["error"]
+    rep = " every day" if r.get("daily") else (
+        " every " + _t.strftime("%A", _t.localtime(r["at"])) if r.get("weekly") is not None else "")
+    return f"Reminder {r['id']} set for {r['described']}{rep}: {r['text']}"
+
+
+def _reminder_line(i: dict) -> str:
+    import time as _t
+    import nova_when
+    rep = " (daily)" if i.get("daily") else (" (weekly)" if i.get("weekly") is not None else "")
+    meet = f" [meeting: {i['title']}]" if i.get("group") else ""
+    return f"- {i['id']}: {nova_when.describe(i['at'])}{rep}{meet} -- {i['text']}"
 
 
 def list_reminders() -> str:
-    """Pending reminders."""
-    import time
+    """Pending reminders and meeting heads-ups, each with its exact date, time and id."""
     items = bridge("/api/reminders").get("reminders") or []
-    return "\n".join(f"- {time.strftime('%a %H:%M', time.localtime(i['at']))} "
-                     f"{'(daily) ' if i.get('daily') else ''}{i['text']}" for i in items) or "No reminders."
+    return "\n".join(_reminder_line(i) for i in items) or "No reminders."
 
 
-def cancel_reminder(which: str) -> str:
-    """Cancel a reminder by its id or by words from its text."""
-    gone = bridge("/api/reminders/cancel", {"which": which}).get("cancelled") or []
-    return f"Cancelled {len(gone)} reminder(s)." if gone else "No matching reminder."
+def cancel_reminder(which: str, include_repeating: bool = False) -> str:
+    """Cancel a reminder by its id (best: list_reminders shows ids) or by words from its text.
+    Daily and weekly reminders are NOT cancelled by words unless include_repeating=true --
+    only when Sir clearly asks to remove a repeating one."""
+    gone = bridge("/api/reminders/cancel", {"which": which, "include_repeating": include_repeating}
+                  ).get("cancelled") or []
+    return ("Cancelled:\n" + "\n".join(_reminder_line(g) for g in gone)) if gone else "No matching reminder."
+
+
+def schedule_meeting(title: str, date: str, time: str = "", where: str = "", who: str = "",
+                     notes: str = "", heads_up: str = "1d,1h,10m") -> str:
+    """Put a meeting or event in Sir's schedule (a trip, a call, a group meeting). date
+    "YYYY-MM-DD", time "HH:MM" 24-hour (work them out from today's date; no time given ->
+    "09:00"). heads_up: when to warn him before it, comma list of d/h/m ("1d,1h,10m" = the
+    day before, an hour before, ten minutes before); he is also told when it starts. Checks
+    it against his class timetable and says if it clashes. Free and local: nothing to sign
+    up for. The reply gives the exact day: tell him that day and time."""
+    import re
+    import time as _t
+    import nova_when
+    r = nova_when.from_fields(date, time)
+    if not r:
+        return "Not set: give date as YYYY-MM-DD and time as HH:MM."
+    start = r["at"]
+    if start <= _t.time():
+        return "Not set: that time has already passed: " + nova_when.describe(start)
+    group = f"m{int(_t.time() * 1000) % 100000000}"
+    hm = _t.strftime("%H:%M", _t.localtime(start))
+    place = f" at {where}" if where else ""
+    with_ = f" with {who}" if who else ""
+    made = []
+    for part in [p.strip().lower() for p in (heads_up or "").split(",") if p.strip()]:
+        m = re.fullmatch(r"(\d+)\s*([dhm])", part)
+        if not m:
+            continue
+        secs = int(m.group(1)) * {"d": 86400, "h": 3600, "m": 60}[m.group(2)]
+        at = start - secs
+        if at <= _t.time() + 30:
+            continue
+        lead = {"d": "tomorrow" if m.group(1) == "1" else f"in {m.group(1)} days",
+                "h": f"in {m.group(1)} hour{'s' * (m.group(1) != '1')}",
+                "m": f"in {m.group(1)} minutes"}[m.group(2)]
+        text = f"Sir, {title}{with_}{place} is {lead}, at {hm}." + (f" {notes}" if notes else "")
+        made.append(bridge("/api/reminders", {"text": text, "date": _t.strftime("%Y-%m-%d", _t.localtime(at)),
+                                              "time": _t.strftime("%H:%M", _t.localtime(at)),
+                                              "group": group, "title": title}))
+    made.append(bridge("/api/reminders", {"text": f"Sir, it is time: {title}{with_}{place}."
+                                                  + (f" {notes}" if notes else ""),
+                                          "date": _t.strftime("%Y-%m-%d", _t.localtime(start)), "time": hm,
+                                          "group": group, "title": title}))
+    bad = [x["error"] for x in made if x.get("error")]
+    if bad:
+        return "Partly set, errors: " + "; ".join(bad)
+    out = [f"Meeting {group} '{title}' set for {nova_when.describe(start)}{with_}{place}. "
+           f"Heads-ups: {len(made) - 1}, plus one when it starts."]
+    try:
+        import nova_schedule as ns
+        import nova_school
+        day = _t.strftime("%Y-%m-%d", _t.localtime(start))
+        lt = _t.localtime(start)
+        mins = lt.tm_hour * 60 + lt.tm_min
+        if not nova_school.no_school(day):
+            for c in ns.classes_on(ns.load(), lt.tm_wday):
+                a, b = (int(x.split(":")[0]) * 60 + int(x.split(":")[1]) for x in (c["start"], c["end"]))
+                if a - 30 <= mins < b:
+                    out.append(f"CLASH: he has {ns.describe(c)} that day. Tell him.")
+        else:
+            out.append(f"No school that day ({nova_school.no_school(day)}).")
+    except Exception:                                 # noqa: BLE001
+        pass
+    return "\n".join(out)
+
+
+def list_meetings() -> str:
+    """Upcoming meetings/events, with exact dates, and their ids for cancel_meeting."""
+    import nova_when
+    items = bridge("/api/reminders").get("reminders") or []
+    seen, out = set(), []
+    for i in items:
+        g = i.get("group")
+        if not g or g in seen:
+            continue
+        seen.add(g)
+        start = max(x["at"] for x in items if x.get("group") == g)
+        out.append(f"- {g}: {i.get('title') or 'meeting'} -- {nova_when.describe(start)}")
+    return "\n".join(out) or "No meetings scheduled."
+
+
+def cancel_meeting(which: str) -> str:
+    """Cancel a meeting and all its heads-ups, by its id (from list_meetings) or title words."""
+    items = bridge("/api/reminders").get("reminders") or []
+    key = which.lower().strip()
+    groups = {i["group"] for i in items if i.get("group") and (i["group"] == key or key in i.get("title", "").lower())}
+    if not groups:
+        return "No matching meeting."
+    n = sum(len(bridge("/api/reminders/cancel", {"which": g}).get("cancelled") or []) for g in groups)
+    return f"Cancelled {len(groups)} meeting(s) ({n} reminders)."
 
 
 def list_routines() -> str:
@@ -762,7 +871,7 @@ def _page(r: dict, src: str = "") -> str:
     return head + "\n".join(out)
 
 
-def web_search(query: str, show: bool = False) -> str:
+def web_search(query: str, show: bool = True) -> str:
     """Search Google in Nova's own Chrome and read the results page. Prefer this over
     WebSearch when Sir wants something looked up the way he would. Result elements are
     numbered: web_click a number to open one. When he wants something ON HIS SCREEN
@@ -771,7 +880,7 @@ def web_search(query: str, show: bool = False) -> str:
     return _page(_hands("search", query=query, show=show))
 
 
-def web_open(url: str, show: bool = False) -> str:
+def web_open(url: str, show: bool = True) -> str:
     """Open a URL in Nova's own Chrome and read it (text + numbered clickable elements).
     If Sir closed her Chrome it reopens by itself: just call this, never tell him the
     browser is closed. show=true also brings the window in front of his other windows:
@@ -784,10 +893,10 @@ def web_read(max_chars: int = 6000) -> str:
     return _page(_hands("read", max_chars=max_chars))
 
 
-def web_click(target: str) -> str:
+def web_click(target: str, show: bool = True) -> str:
     """Click an element in Nova's Chrome: a number from the last read, or its visible text.
     Refused on Messenger, Facebook and Gmail (read-only)."""
-    return _page(_hands("click", target=target))
+    return _page(_hands("click", target=target, show=show))
 
 
 def web_type(target: str, text: str, enter: bool = False) -> str:
@@ -930,7 +1039,7 @@ ALL = [class_schedule, school_days, stock_quote, web_search, web_open, web_read,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read,
        whatsapp_chats, whatsapp_read, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
-       remind, list_reminders, cancel_reminder, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
+       remind, list_reminders, cancel_reminder, schedule_meeting, list_meetings, cancel_meeting, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
        remember, recall, forget, day_log, say,
        server_status, minecraft_players, minecraft_say, minecraft_save,

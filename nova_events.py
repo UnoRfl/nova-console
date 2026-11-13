@@ -103,31 +103,11 @@ def in_quiet_hours(spec: str, now: time.struct_time | None = None) -> bool:
 # ---------------------------------------------------------------- reminders
 
 def parse_when(text: str, now: float | None = None) -> tuple[float, str] | None:
-    """'in 20 minutes' / 'at 14:30' / 'at 8 am' -> (epoch, daily 'HH:MM' or '')."""
-    now = time.time() if now is None else now
-    t = text.lower()
-    m = re.search(r"\bin\s+(\d+|an?|half an)\s*(second|sec|minute|min|hour|hr)s?\b", t)
-    if m:
-        n = {"a": 1, "an": 1, "half an": 0.5}.get(m[1], None)
-        n = float(m[1]) if n is None else n
-        unit = {"s": 1, "m": 60, "h": 3600}[m[2][0]]
-        return now + n * unit, ""
-    m = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", t)
-    if m:
-        hour, minute = int(m[1]), int(m[2] or 0)
-        if m[3] == "pm" and hour < 12:
-            hour += 12
-        if m[3] == "am" and hour == 12:
-            hour = 0
-        if hour > 23 or minute > 59:
-            return None
-        lt = time.localtime(now)
-        target = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, minute, 0, 0, 0, -1))
-        if target <= now:
-            target += 86400
-        daily = f"{hour:02d}:{minute:02d}" if re.search(r"\b(every ?day|daily|each day|every morning|every night)\b", t) else ""
-        return target, daily
-    return None
+    """'in 20 minutes' / 'at 14:30' / 'on the 16th of November at 9' -> (epoch, daily 'HH:MM' or '').
+    The reading itself lives in nova_when (dates, weekdays, Filipino months...)."""
+    import nova_when
+    r = nova_when.parse(text, now)
+    return (r["at"], r["daily"]) if r else None
 
 
 class Reminders:
@@ -146,21 +126,37 @@ class Reminders:
         except OSError:
             pass
 
-    def add(self, text: str, at: float, daily: str = "", kind: str = "say") -> dict:
-        """kind 'say' speaks the text; 'ask' runs it through Nova as a request."""
+    def add(self, text: str, at: float, daily: str = "", kind: str = "say",
+            weekly: int | None = None, group: str = "", title: str = "") -> dict:
+        """kind 'say' speaks the text; 'ask' runs it through Nova as a request.
+        daily "HH:MM" repeats every day, weekly 0-6 every week on that day.
+        group ties a meeting's heads-ups together (cancel them as one)."""
         with self.lock:
             items = self._load()
-            item = {"id": f"r{int(time.time() * 10) % 1000000}", "text": " ".join(text.split()),
-                    "at": at, "daily": daily, "kind": kind}
+            ident = f"r{int(time.time() * 1000) % 100000000}"
+            while any(i["id"] == ident for i in items):
+                ident = f"r{int(ident[1:]) + 1}"
+            item = {"id": ident, "text": " ".join(text.split()), "at": at, "daily": daily, "kind": kind}
+            if weekly is not None:
+                item["weekly"] = int(weekly)
+            if group:
+                item["group"], item["title"] = group, title
             items.append(item)
             self._save(items)
             return item
 
-    def cancel(self, ident_or_text: str) -> list[dict]:
+    def cancel(self, ident_or_text: str, include_repeating: bool = False) -> list[dict]:
+        """Cancel by id, meeting group or words from the text. Daily and weekly
+        reminders are left alone unless include_repeating (Sir lost his daily
+        ones once to a careless "cancel the reminders")."""
         key = ident_or_text.lower().strip()
         with self.lock:
             items = self._load()
-            gone = [i for i in items if i["id"] == key or (key and key in i["text"].lower())]
+            # Words never pull heads-ups out of a meeting: that is cancel_meeting's job (by group).
+            gone = [i for i in items if i["id"] == key or i.get("group") == key
+                    or (key and not i.get("group") and key in i["text"].lower())]
+            if not include_repeating and not any(i["id"] == key for i in gone):
+                gone = [i for i in gone if not (i.get("daily") or i.get("weekly") is not None)]
             self._save([i for i in items if i not in gone])
             return gone
 
@@ -178,10 +174,11 @@ class Reminders:
                 return []
             keep = [i for i in items if i["at"] > now]
             for i in ready:
-                if i.get("daily"):
+                if i.get("daily") or i.get("weekly") is not None:
                     nxt = dict(i)
+                    step = 86400 if i.get("daily") else 7 * 86400
                     while nxt["at"] <= now:
-                        nxt["at"] += 86400
+                        nxt["at"] += step
                     keep.append(nxt)
             self._save(keep)
             return ready
@@ -654,7 +651,7 @@ class Events:
         if time.strftime("%H:%M") >= when and not self.should_hold():
             self.briefed = today
             self._ask("Give Sir his morning briefing, spoken, four sentences at most: the date, "
-                      "his classes today (class_schedule tool; if school_days says there is no "
+                      "any meetings today (list_meetings), his classes today (class_schedule tool; if school_days says there is no "
                       "school today, say that instead), "
                       "whether the Minecraft server is up, any background jobs that finished, and "
                       "anything in your memory he asked to be reminded of today. Use your tools.")
