@@ -499,11 +499,25 @@ class Hands:
         rows = page.evaluate(self.ROWS_JS, 50)
         if unread_only:
             rows = [r for r in rows if r["unread"]]
+        # The list only holds one page (50). Gmail's own unread total sits on
+        # the "Inbox" link in the left menu (aria-label "Inbox 1,234 unread").
+        total = page.evaluate(r"""() => {
+          for (const a of document.querySelectorAll('a[href$="#inbox"], [role=navigation] a')) {
+            const m = (a.getAttribute('aria-label') || '').match(/^Inbox\s+([\d,.]+)\s+unread/i);
+            if (m) return m[1].replace(/[,.]/g, '');
+          }
+          return null;
+        }""")
         taint("gmail")
+        note = "Read-only. Listing does not mark anything read."
+        if total is not None:
+            note = f"Gmail says {total} unread in the Inbox in total. " + note
+        else:
+            note = "Unread total not shown by Gmail; the list below is one page (up to 50) only. " + note
         return {"mail": [f"{'(unread) ' if r['unread'] else ''}{r['date']} -- {r['from']}"
                          f"{' <' + r['email'] + '>' if r['email'] else ''}: {r['subject']} -- {r['snippet']}"
                          for r in rows[: int(limit)]] or ["Nothing here."],
-                "note": "Read-only. Listing does not mark anything read."}
+                "unread_total": total, "note": note}
 
     def do_gmail_read(self, match: str, query: str = "", max_chars: int = 5000) -> dict:
         """Open the newest message whose sender/subject/snippet contains `match`."""
