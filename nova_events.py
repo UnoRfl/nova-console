@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 SCHOOL_SCAN = threading.Lock()                     # one school-notice scan at a time
+TESTING = bool(__import__("os").environ.get("NOVA_TEST"))
 
 ROOT = Path.home() / ".nova"
 REMINDERS_FILE = ROOT / "reminders.json"
@@ -285,6 +286,15 @@ class Events:
         self.narrated: dict[str, tuple[float, int]] = {}   # job id -> (when, steps) last spoken
         self.checking = False              # one standing-order check at a time
         self.school_busy = False           # one school-notice scan at a time
+        # Mark V: she acts before being asked (nova_extras).
+        import nova_extras as nx
+        self.nx = nx
+        self.arrival = nx.Arrival()
+        self.health = nx.Health()
+        self.rules = nx.Rules()
+        self.presence_change = ""          # "left" / "returned" on the tick it happens
+        self.briefing_busy = False
+        self.ci_seen: dict | None = None   # repo -> was failing, at the last look
 
     # -- speaking, with manners
     def should_hold(self) -> str:
@@ -297,12 +307,19 @@ class Events:
             return "you are away"
         return ""
 
-    def announce(self, text: str, urgent: bool = False) -> str:
-        """Say it now, or hold it if this is a bad moment. Returns what happened."""
+    def announce(self, text: str, urgent: bool = False, push: bool = False) -> str:
+        """Say it now, or hold it if this is a bad moment. Returns what happened.
+        push: worth reaching him away from the desk too (a finished job, CI
+        breaking), even though it is not urgent enough to interrupt."""
         why = "" if urgent else self.should_hold()
         if why:
             with self.lock:
                 self.held.append(text)
+            if push and self.presence.away and self._notify:
+                try:
+                    self._notify(text)
+                except Exception:                     # noqa: BLE001
+                    pass
             if self.activity:
                 self.activity.push("system", "Held", f"{why}: {text[:120]}")
             return f"held ({why})"
@@ -357,10 +374,32 @@ class Events:
         r = load_routines().get(name)
         if not r:
             return {"error": "No such routine."}
+        done, skipped, asks = self.run_steps(r["steps"], collect_asks)
+        return {"ok": True, "name": name, "say": r.get("say", ""), "done": done,
+                "skipped": skipped, "asks": asks}
+
+    def run_steps(self, steps: list, collect_asks: bool = False, depth: int = 0) -> tuple[list, list, list]:
+        """The steps of a routine or a rule: set / tool / ask / say / routine / brief."""
         import nova_tools
         funcs = {f.__name__: f for f in nova_tools.ALL}
         done, skipped, asks = [], [], []
-        for step in r["steps"]:
+        for step in steps:
+            if "routine" in step:
+                inner = load_routines().get(str(step["routine"]))
+                if inner and depth < 2:
+                    if inner.get("say"):
+                        self._announce(inner["say"])
+                    d, s, a = self.run_steps(inner["steps"], collect_asks, depth + 1)
+                    done += d
+                    skipped += s
+                    asks += a
+                else:
+                    skipped.append(f"routine {step['routine']}")
+                continue
+            if step.get("brief"):
+                self.brief(force=True)
+                done.append("brief")
+                continue
             if "set" in step:
                 self.state.update(step["set"])
                 done.append("state")
@@ -385,8 +424,90 @@ class Events:
             elif "say" in step:
                 self._announce(step["say"])
                 done.append("say")
-        return {"ok": True, "name": name, "say": r.get("say", ""), "done": done,
-                "skipped": skipped, "asks": asks}
+        return done, skipped, asks
+
+    # -- Mark V: briefing, health, rules, follow-ups, project CI
+    def brief(self, force: bool = False) -> bool:
+        """Speak the briefing, composed here with no model. Gathering takes a few
+        seconds (weather, mail), so it runs in its own thread."""
+        if self.briefing_busy:
+            return False
+        self.briefing_busy = True
+        state = self.nx.load_state()
+        since = float(state.get("briefed_at") or 0) or time.time() - 16 * 3600
+
+        def work():
+            try:
+                text = self.nx.compose_briefing(self.nx.gather_briefing(self, since))
+                s = self.nx.load_state()
+                s["briefed"], s["briefed_at"] = time.strftime("%Y-%m-%d"), time.time()
+                self.nx.save_state(s)
+                self.loops_told = time.strftime("%Y-%m-%d")      # the briefing covered the loose ends
+                if self.activity:
+                    self.activity.push("system", "Briefing", text[:160])
+                self._announce(text)
+            except Exception as exc:                  # noqa: BLE001
+                if self.activity:
+                    self.activity.push("system", "Briefing error", f"{type(exc).__name__}: {exc}"[:160])
+            finally:
+                self.briefing_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def check_arrival(self) -> None:
+        c = self.nx.cfg()
+        briefed = str(self.nx.load_state().get("briefed") or "")
+        if self.arrival.step(self.ni.idle_seconds(), time.time(), c, briefed) and not self.should_hold():
+            self.arrival.pending = False
+            self.brief()
+
+    def check_health(self) -> None:
+        c = self.nx.cfg()
+        if not c["watch_health"]:
+            return
+        for line in self.health.step(c):
+            self.announce(line)
+
+    def check_rules(self) -> None:
+        change, self.presence_change = self.presence_change, ""
+        for rule in self.rules.step(self.stack, change):
+            if self.activity:
+                self.activity.push("system", "Rule", f"{rule.get('name')}: {self.nx.describe_rule(rule)}"[:160])
+            if rule.get("say"):
+                self.announce(rule["say"], push=True)
+            self.run_steps(rule.get("steps") or [])
+
+    def check_follow_up(self) -> None:
+        """A loose end, at a quiet moment: he is at the desk but has paused for
+        a minute or two, nothing is being said, and it is not a bad time."""
+        c = self.nx.cfg()
+        if not c["follow_ups"] or self.should_hold() or self.briefing_busy:
+            return
+        idle = self.ni.idle_seconds()
+        if not (90 <= idle <= 480):
+            return
+        import nova_memory
+        state = self.nx.load_state()
+        raised = state.setdefault("loops_raised", {})
+        item = self.nx.pick_loop(nova_memory.loops(), raised, c)
+        if not item:
+            return
+        raised[str(item["id"])] = time.time()
+        for k in [k for k, t in raised.items() if time.time() - float(t) > 30 * 86400]:
+            raised.pop(k, None)
+        self.nx.save_state(state)
+        if self.activity:
+            self.activity.push("system", "Loose end", item["text"][:120])
+        self.announce(self.nx.loop_line(item))
+
+    def check_projects(self) -> None:
+        board = self.nx.project_board()
+        if not board.get("repos"):
+            return
+        for line in self.nx.ci_changes(self.ci_seen, board):
+            self.announce(line, push=True)
+        self.ci_seen = {p["repo"]: p.get("ci") in ("FAILURE", "ERROR") for p in board["repos"] if not p.get("missing")}
 
     # -- watchers
     def check_minecraft(self, status: str | None = None) -> None:
@@ -467,6 +588,8 @@ class Events:
     def check_presence(self) -> None:
         self.presence.away_after = float(cfg()["away_minutes"]) * 60
         change = self.presence.step()
+        if change:
+            self.presence_change = change
         if change == "left" and self.activity:
             self.activity.push("system", "Away", "no input for a while; holding what is not urgent")
         if change == "returned":
@@ -672,6 +795,11 @@ class Events:
                 self.flush_held()
                 self.check_orders()
                 self.narrate_jobs()
+                if not TESTING:                       # a test bridge never briefs, nags or reads his mail
+                    self.check_rules()
+                    self.check_arrival()
+                    if tick % 3 == 1:                 # every half minute
+                        self.check_follow_up()
                 c = cfg()
                 if tick % 12 == 0:                    # every two minutes
                     if c["watch_minecraft"]:
@@ -685,8 +813,12 @@ class Events:
                         self.check_gpu()
                     self.check_briefing()
                     self.check_school()
+                    if not TESTING:
+                        self.check_health()
                 if tick % 60 == 30:                   # every ten minutes
                     self.check_prs()
+                    if not TESTING:
+                        self.check_projects()
             except Exception as exc:                  # noqa: BLE001 -- never let the loop die
                 if self.activity:
                     self.activity.push("system", "Events error", f"{type(exc).__name__}: {exc}"[:160])

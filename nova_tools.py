@@ -62,6 +62,11 @@ TIERS = {
     "keep_watch": "announce", "list_watches": "free", "cancel_watch": "announce",
     "open_loops": "free", "close_loop": "announce",
     "look_at_this": "free", "presence": "free",
+    "briefing": "free", "read_screen": "free", "list_rules": "free", "project_status": "free",
+    "clipboard_read": "free", "recent_files": "free",
+    "clipboard_write": "announce", "save_note": "announce", "delete_rule": "announce",
+    "notes_start": "announce", "notes_stop": "announce",
+    "save_rule": "confirm",       # a new standing behaviour, like save_routine
     "class_schedule": "free", "school_days": "free", "stock_quote": "free",
     "spotify_play": "announce",
     # Hands. Looking and reading are free. Driving her own sandboxed Chrome is
@@ -1066,7 +1071,100 @@ def open_settings(page: str = "") -> str:
     return f"Opened Settings ({uri}). Use desktop_look window=\"Settings\" next."
 
 
-ALL = [class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
+# ---- Mark V (nova_extras): briefing, screen text, rules, projects, desk, notes
+
+def briefing() -> str:
+    """Speak Sir's briefing now (date, weather, classes, reminders, mail, jobs, loose ends).
+    She composes and speaks it herself; just confirm briefly."""
+    return "The briefing is being spoken now." if bridge("/api/briefing", {}).get("ok") else "A briefing is already under way."
+
+
+def read_screen(whole: bool = False) -> str:
+    """The TEXT on Sir's screen, by local OCR: the window in front, or every screen with
+    whole=True. Far cheaper than reading a screenshot; use it first for errors and messages."""
+    import nova_extras
+    r = nova_extras.read_screen(whole)
+    return (r["text"] or "(no text found)") + f"\n[screenshot, if the layout matters: {r['image']}]"
+
+
+def save_rule(name: str, when_kind: str, when_value: str = "", steps: list[dict] | None = None,
+              say: str = "", cooldown_minutes: int = 10) -> str:
+    """A standing "when X, do Y". when_kind: app_open | app_close (when_value = process name,
+    e.g. "robloxstudiobeta") | service_down | service_up (minecraft, panel, tunnel) |
+    time (HH:MM daily) | back | away. steps: like a routine's: {"tool": name, "args": {}},
+    {"ask": "a request you then carry out"}, {"say": "..."}, {"routine": name}, {"brief": true}."""
+    r = bridge("/api/rules/save", {"name": name, "when_kind": when_kind, "when_value": when_value,
+                                   "steps": steps or [], "say": say, "cooldown_minutes": cooldown_minutes})
+    return r.get("error") or f"Rule '{r['name']}' saved."
+
+
+def list_rules() -> str:
+    """The standing when-X-do-Y rules."""
+    rows = bridge("/api/rules").get("rules") or []
+    return "\n".join(f"- {r['name']}: {r['described']}, {len(r.get('steps') or [])} step(s)"
+                     + (f', says "{r["say"]}"' if r.get("say") else "") for r in rows) or "No rules."
+
+
+def delete_rule(which: str) -> str:
+    """Remove a rule, by name or words from it."""
+    gone = bridge("/api/rules/delete", {"which": which}).get("deleted") or []
+    return "Removed: " + ", ".join(g["name"] for g in gone) if gone else "No matching rule."
+
+
+def project_status() -> str:
+    """Sir's GitHub projects at a glance: open pull requests, CI state, last commit."""
+    import nova_extras
+    return nova_extras.board_text(nova_extras.project_board())
+
+
+def clipboard_read() -> str:
+    """The text Sir has on the clipboard."""
+    import nova_initiative
+    text = nova_initiative.clipboard_text(6000)
+    if not text:
+        return "The clipboard holds no text."
+    if nova_initiative.looks_secret(text):
+        return "The clipboard holds something that looks like a password or key; it is not passed on."
+    return text
+
+
+def clipboard_write(text: str) -> str:
+    """Put text on Sir's clipboard, ready for him to paste."""
+    import nova_extras
+    return "On the clipboard." if nova_extras.clipboard_write(text) else "The clipboard would not open."
+
+
+def save_note(text: str, title: str = "") -> str:
+    """Append a note to Sir's notes file (Documents/Nova Notes). For "save this", "note that down"."""
+    import nova_extras
+    return "Saved to " + nova_extras.save_note(text, title)
+
+
+def recent_files(where: str = "downloads", days: float = 2, contains: str = "") -> str:
+    """Newest files in downloads | desktop | documents | pictures | videos (or a full path),
+    optionally only names containing some text. For "the file I downloaded yesterday"."""
+    import nova_extras
+    rows = nova_extras.recent_files(where, days, contains)
+    return "\n".join(f"{r['when']}  {r['mb']} MB  {r['path']}" for r in rows) or "Nothing that recent."
+
+
+def notes_start(title: str = "") -> str:
+    """Start recording a meeting or lecture through the microphone. It is transcribed and
+    summarised on this PC when stopped (no Claude usage)."""
+    r = bridge("/api/notes/start", {"title": title})
+    return r.get("error") or f"Recording '{r['title']}'."
+
+
+def notes_stop() -> str:
+    """Stop the recording. The transcript and summary are written in the background and
+    she announces when they are ready."""
+    r = bridge("/api/notes/stop", {})
+    return r.get("error") or f"Stopped after {r['minutes']} minutes; writing it up now."
+
+
+ALL = [briefing, read_screen, save_rule, list_rules, delete_rule, project_status, clipboard_read, clipboard_write,
+       save_note, recent_files, notes_start, notes_stop,
+       class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read, gmail_send, gmail_reply,
        whatsapp_chats, whatsapp_read, spotify_play, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,

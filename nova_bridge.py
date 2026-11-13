@@ -43,6 +43,7 @@ import nova_presence  # noqa: E402
 import nova_router  # noqa: E402
 import nova_initiative  # noqa: E402
 import nova_schedule  # noqa: E402
+import nova_extras  # noqa: E402
 
 try:                        # "play X on Spotify" with no model (nova_spotify.py)
     import nova_spotify
@@ -81,6 +82,9 @@ if os.environ.get("NOVA_TEST"):
     nova_initiative.WATCH_STATE = STATE / "watch-state.json"
     nova_presence.BASELINE_FILE = STATE / "lights-baseline.json"
     nova_schedule.SCHEDULE_FILE = STATE / "schedule.json"   # a test bridge never nags about real classes
+    nova_extras.STATE_FILE = STATE / "extras-state.json"
+    nova_extras.RULES_FILE = STATE / "rules.json"
+    nova_extras.NOTES_DIR = STATE / "notes"
 
 # How long a wake signal stays claimable. Long enough for a cold browser
 # launch, short enough that a stale one never arms the mic out of nowhere.
@@ -242,7 +246,10 @@ def write_mcp_config() -> str:
 PRIVATE_TOOLS = {"messenger_chats", "messenger_read", "gmail_inbox", "gmail_read", "gmail_send", "gmail_reply", "whatsapp_chats",
                  "whatsapp_read", "desktop_look", "web_search", "web_open", "web_read", "web_tabs",
                  "web_screenshot", "web_scroll", "web_back", "web_show", "capture_screen",
-                 "list_windows", "foreground_app", "look_at_this", "day_log", "recall"}
+                 "list_windows", "foreground_app", "look_at_this", "day_log", "recall",
+                 "read_screen", "clipboard_read", "clipboard_write", "save_note", "recent_files",
+                 "notes_start", "notes_stop", "briefing", "project_status", "list_rules", "save_rule",
+                 "delete_rule"}
 
 
 def nova_tool_names(*tiers: str) -> list[str]:
@@ -364,6 +371,10 @@ answer. When he says "keep an eye on", "tell me when", "let me know if",
 "watch", or "while I'm out", take a standing order with keep_watch -- never
 merely promise to, because a promise without the tool is forgotten the moment
 this reply ends. You check it yourself on a timer and speak when it changes.
+"When X happens, do Y" (an app opening or closing, a service dropping, a
+time of day, him coming back) is a rule: save it with save_rule, which costs
+nothing until it fires. To read what is on his screen use read_screen (text,
+cheap) before a screenshot. Meeting or lecture notes: notes_start, notes_stop.
 If you see something he would want to know while doing something else (a
 failing server, a full disk, a job that ended badly), say so in one sentence
 at the end of your reply. If you think he is about to make a mistake, say so
@@ -1363,9 +1374,11 @@ class Backend:
         for x in own:
             lines.append("Sir: " + x["user"][:500])
             lines.append("You: " + x["reply"][:500])
-        return ("(Context: your conversation was refreshed to keep it light. The last few "
-                "exchanges, so you can carry on naturally -- do not mention the refresh:\n"
-                + "\n".join(lines) + ")\n\n")
+        return ("(Background only: your conversation was refreshed to keep it light. These are the "
+                "last few exchanges, so you can carry on naturally. They are FINISHED and he has "
+                "already heard the replies: do not repeat or report them again, and do not mention "
+                "the refresh. Answer only his new request, which follows this note.\n"
+                + "\n".join(lines) + ")\n\nHis new request: ")
 
     def refresh(self, why: str, warm: bool) -> None:
         """Drop this chat. With warm, start the replacement now so he never waits for it."""
@@ -1600,8 +1613,14 @@ class Backend:
         for x in missed:
             lines.append("Sir: " + x["user"][:400])
             lines.append("You: " + x["reply"][:400])
-        return ("(Context: earlier in this conversation, answered by another of your engines.\n"
-                + "\n".join(lines) + ")\n\n")
+        # Sir, 2026-11-14: after a second task she reported the first one again
+        # and then the second. This note was the cause: handed a finished
+        # exchange, the next engine took it as something still to report.
+        return ("(Background only: earlier in this conversation, already answered by another of your "
+                "engines. Those requests are FINISHED and he has already heard the replies. Do not "
+                "repeat, summarise or mention them again unless he asks; answer only his new request, "
+                "which follows this note.\n"
+                + "\n".join(lines) + ")\n\nHis new request: ")
 
     def record(self, prompt: str, reply: str, key: str) -> None:
         self.turn_no += 1
@@ -1623,7 +1642,10 @@ class Backend:
         that runs answers. A forced model, another channel, or routing turned
         off goes straight to ask_fixed, the old single-model path.
         """
-        if not self.routable(model):
+        # Over today's allowance, a pinned model gives way too: the router
+        # below then plans the free brains instead of spending more.
+        spent = self.cfg.get("channel") in (None, "owner") and self.over_budget()
+        if not self.routable(model) and not spent:
             owner = self.cfg.get("channel") in (None, "owner")
             # A pinned model still hears what he said from his phone meanwhile.
             note = self.context_for("fixed", self.seen_upto) if owner and not reset else ""
@@ -2088,7 +2110,7 @@ class Handler(BaseHTTPRequestHandler):
     # do: load the phone page, ask, and send audio to be transcribed. It cannot
     # approve an action, start a job, speak through the PC, take a screenshot,
     # upload a file or change a setting.
-    REMOTE_GET = {"/phone", "/api/health", "/api/phone/screen"}
+    REMOTE_GET = {"/phone", "/api/health", "/api/phone/screen", "/api/notices"}
     REMOTE_POST = {"/api/ask", "/api/transcribe"}
 
     def remote(self) -> bool:
@@ -2282,6 +2304,47 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/usage":
             self.send_json(self.server.usage.today())
+            return
+
+        if route == "/api/notices":
+            # What she has said unprompted since the caller last looked. From
+            # outside, only Sir's own phone gets it.
+            if self.remote() and not owner_login(self.headers.get("Tailscale-User-Login", "")):
+                self.send_json({"notices": [], "seq": 0})
+                return
+            since = 0
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            for part in query.split("&"):
+                if part.startswith("since=") and part[6:].isdigit():
+                    since = int(part[6:])
+            with self.server.notice_lock:
+                rows = [n for n in self.server.notices if n["seq"] > since]
+                seq = self.server.notice_seq
+            self.send_json({"notices": rows, "seq": seq})
+            return
+
+        if route == "/api/projects":
+            board = nova_extras.project_board(fresh="fresh=1" in self.path)
+            for p in board.get("repos", []):
+                p["ago"] = nova_extras.ago(p.get("when") or "")
+            self.send_json(board)
+            return
+
+        if route == "/api/rules":
+            self.send_json({"rules": [dict(r, described=nova_extras.describe_rule(r))
+                                      for r in nova_extras.load_rules()]})
+            return
+
+        if route == "/api/notes":
+            self.send_json(self.server.notes.status())
+            return
+
+        if route == "/api/pc":
+            h = self.server.events.health
+            self.send_json({"ram": h.last.get("ram"), "cpu": h.last.get("cpu"),
+                            "gpu_c": nova_initiative.gpu_temp(),
+                            "drives": [{"drive": d, "free_percent": round(p), "free_gb": round(g)}
+                                       for d, p, g in nova_extras.drives()]})
             return
 
         if route == "/api/voice":
@@ -2538,6 +2601,36 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/routines/run":
             self.send_json(self.server.events.run_routine(str(body.get("name") or "")))
+            return
+
+        if route == "/api/rules/save":
+            rule = nova_extras.add_rule(str(body.get("name") or ""), str(body.get("when_kind") or ""),
+                                        str(body.get("when_value") or ""), list(body.get("steps") or []),
+                                        str(body.get("say") or ""), body.get("cooldown_minutes") or 10)
+            if "error" not in rule:
+                log(f"rule {rule['id']}: {nova_extras.describe_rule(rule)}")
+                self.server.activity.push("system", "Rule saved", f"{rule['name']}: {nova_extras.describe_rule(rule)}"[:160])
+            self.send_json(rule)
+            return
+
+        if route == "/api/rules/delete":
+            gone = nova_extras.delete_rule(str(body.get("which") or ""))
+            for g in gone:
+                log(f"rule {g['id']} deleted")
+            self.send_json({"deleted": gone})
+            return
+
+        if route == "/api/notes/start":
+            out = self.server.notes.start(str(body.get("title") or ""))
+            self.send_json(out)
+            return
+
+        if route == "/api/notes/stop":
+            self.send_json(self.server.notes.stop(bool(body.get("keep_audio"))))
+            return
+
+        if route == "/api/briefing":
+            self.send_json({"ok": self.server.events.brief(force=True)})
             return
 
         if route == "/api/routines/save":
@@ -2811,6 +2904,30 @@ class Handler(BaseHTTPRequestHandler):
                                 "memories": len(load_memories(limit=10_000))})
                 return
 
+            # "Start taking notes on X" / "stop the notes" / "brief me": done
+            # here with no model. At the desk only.
+            quick = None if self.remote() else nova_extras.quick_command(prompt)
+            if quick:
+                kind, arg = quick
+                if kind == "notes_start":
+                    r = self.server.notes.start(arg)
+                    text = r.get("error") or f"Recording notes on {r['title']}, Sir. Tell me when to stop."
+                    if "title" in r and not arg:
+                        text = "Recording notes, Sir. Tell me when to stop."
+                elif kind == "notes_stop":
+                    r = self.server.notes.stop()
+                    text = r.get("error") or ("Stopped, Sir. I will write them up and tell you when they are ready.")
+                else:
+                    started = self.server.events.brief(force=True)
+                    text = "" if started else "One moment, Sir, I am already putting it together."
+                log(f"quick (no model): {kind} {arg}".rstrip())
+                self.server.activity.push("system", "Quick", kind)
+                spoken = self.server.speak_now(text) if (body.get("speak") and text) else False
+                self.send_json({"text": text or "Putting your briefing together, Sir.", "ms": 0, "turns": 0,
+                                "denials": 0, "remembered": [], "quick": kind, "spoken": spoken or kind == "brief",
+                                "memories": len(load_memories(limit=10_000))})
+                return
+
             pc = panel_command(prompt, time.time() - self.server.panel_seen < 6
                                        or channel == "panel")
             if pc:
@@ -2951,9 +3068,13 @@ class Handler(BaseHTTPRequestHandler):
                     route_text = prompt + " (on my screen)"   # needs eyes: never the tool-less chat model
                     self.server.activity.push("system", "Context", "attached what he is pointing at")
 
-            if self.server.usage.over("claude"):
-                msg = ("Today's Claude allowance is used up, Sir. Raise budget.claude_daily_usd "
-                       "in config.json if you want me to carry on.")
+            # Over today's allowance: she does not refuse, she drops to the
+            # brains that cost nothing (the router sees over_budget and plans
+            # Codex / the local model). Only when neither exists is it an error.
+            if self.server.usage.over("claude") and not (
+                    self.server.backend.codex_ready() or nova_harness.local_model()):
+                msg = ("Today's Claude allowance is used up, Sir, and no other brain is available. "
+                       "Raise budget.claude_daily_usd in config.json if you want me to carry on.")
                 self.send_json({"error": "budget", "detail": msg})
                 return
 
@@ -3200,6 +3321,7 @@ def main() -> int:
 
     httpd.mode = mode
     httpd.lights = nova_presence.Lights(mode)
+    httpd.notices, httpd.notice_seq, httpd.notice_lock = [], 0, threading.Lock()
 
     def announce(text: str) -> None:
         """Say something unprompted, without cutting across a reply in flight."""
@@ -3208,6 +3330,12 @@ def main() -> int:
             return
         activity.push("system", "Nova", text[:200])
         log(f"announce: {text[:160]}")
+        # Everything she says unprompted is also kept as a notice, so his
+        # phone can show what he missed (GET /api/notices).
+        with httpd.notice_lock:
+            httpd.notice_seq += 1
+            httpd.notices.append({"seq": httpd.notice_seq, "at": time.time(), "text": text[:400]})
+            del httpd.notices[:-60]
         nova_presence.pocket_note(text)
         if not nova_voice or cfg.get("tts", "kokoro") != "kokoro":
             return
@@ -3232,9 +3360,9 @@ def main() -> int:
         log(f"job {job['id']} {job['state']} after {mins} min")
         if job["state"] == "done":
             httpd.events.announce(f"Sir, the background job, {job['title']}, has finished after "
-                                  f"about {mins} minute{'s' if mins != 1 else ''}.")
+                                  f"about {mins} minute{'s' if mins != 1 else ''}.", push=True)
         elif job["state"] == "failed":
-            httpd.events.announce(f"Sir, the background job, {job['title']}, has failed.")
+            httpd.events.announce(f"Sir, the background job, {job['title']}, has failed.", push=True)
 
     httpd.announce = announce
 
@@ -3411,6 +3539,7 @@ def main() -> int:
     httpd.events = nova_events.Events(announce=announce, ask=ask_and_speak, activity=activity,
                                       check=silent_check, jobs=httpd.jobs, notify=notify_away,
                                       judge=silent_judge)
+    httpd.notes = nova_extras.Notes(announce=lambda t: httpd.events.announce(t, push=True), log=log)
     httpd.daemon_threads = True
 
     url = f"http://127.0.0.1:{args.port}/?token={token}"

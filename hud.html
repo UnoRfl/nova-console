@@ -701,6 +701,7 @@
     <button type="button" data-open="voice"  data-tip="Voice"   aria-label="Voice"   aria-expanded="false"><svg class="ico" aria-hidden="true"><use href="#ic-speaker"></use></svg></button>
     <button type="button" data-open="ears"   data-tip="Hearing" aria-label="Hearing" aria-expanded="false"><svg class="ico" aria-hidden="true"><use href="#ic-mic"></use></svg></button>
     <button type="button" data-open="agenda" data-tip="Agenda"  aria-label="Agenda"  aria-expanded="false"><svg class="ico" aria-hidden="true"><use href="#ic-calendar"></use></svg><i class="badge" id="agendaBadge" hidden></i></button>
+    <button type="button" data-open="work"   data-tip="Work"    aria-label="Work"    aria-expanded="false"><svg class="ico" aria-hidden="true"><use href="#ic-mesh"></use></svg><i class="badge" id="workBadge" hidden></i></button>
     <button type="button" data-open="log"    data-tip="Conversation" aria-label="Conversation" aria-expanded="false"><svg class="ico" aria-hidden="true"><use href="#ic-list"></use></svg></button>
     <button type="button" data-open="system" data-tip="System"  aria-label="System"  aria-expanded="false"><svg class="ico" aria-hidden="true"><use href="#ic-pulse"></use></svg><i class="badge" id="systemBadge" hidden></i></button>
   </nav>
@@ -789,6 +790,18 @@
       <div class="group"><h3>Running jobs</h3><div class="group" id="agJobs"><p class="empty">Nothing running.</p></div></div>
       <div class="group"><h3>Standing watches</h3><div class="group" id="agOrders"><p class="empty">Not watching anything.</p></div></div>
       <div class="group"><h3>Routines</h3><div class="group" id="agRoutines"><p class="empty">&mdash;</p></div></div>
+      <div class="group"><h3>Rules</h3><div class="group" id="agRules"><p class="empty">No rules yet.</p></div></div>
+    </section>
+
+    <section class="pane" data-pane="work" data-title="Work">
+      <div class="group">
+        <div class="btn-row">
+          <button class="hud btn" id="briefNow" title="Hear the briefing now"><svg class="ico" aria-hidden="true"><use href="#ic-speaker"></use></svg><span class="lbl">Brief me</span></button>
+          <button class="hud btn" id="notesBtn" title="Record a meeting or lecture; transcribed and summarised on this PC"><svg class="ico" aria-hidden="true"><use href="#ic-mic"></use></svg><span class="lbl">Take notes</span></button>
+        </div>
+        <p class="empty" id="notesState"></p>
+      </div>
+      <div class="group"><h3>Projects</h3><div class="group" id="wkProjects"><p class="empty">&mdash;</p></div></div>
     </section>
 
     <section class="pane" data-pane="log" data-title="Conversation">
@@ -807,6 +820,10 @@
         <div class="readout"><span class="k">Exchanges</span><span class="v" id="tTurns">0</span></div>
         <div class="readout"><span class="k">Panel open for</span><span class="v" id="tUptime">00:00</span></div>
         <div class="readout"><span class="k">Audio</span><span class="v" id="diagCount">&mdash;</span></div>
+      </div>
+      <div class="group">
+        <h3>This PC</h3>
+        <div id="sysPc"><p class="empty">&mdash;</p></div>
       </div>
       <div class="group">
         <h3>Around the house</h3>
@@ -5318,6 +5335,20 @@
     if (e.key === "Escape" && deck.open) { e.stopImmediatePropagation(); deckClose(); }
   }, true);
 
+  $("briefNow").addEventListener("click", async () => {
+    try { await api("/api/briefing", { method: "POST", body: "{}" }); sysLine("Briefing", "SPEAKING", "ok"); }
+    catch (e) { notify(e.message); }
+  });
+  $("notesBtn").addEventListener("click", async () => {
+    try {
+      const rec = $("notesBtn").dataset.rec === "1";
+      const r = await api(rec ? "/api/notes/stop" : "/api/notes/start", { method: "POST", body: "{}" });
+      if (r.error) notify(r.error);
+      else sysLine("Notes", rec ? "WRITING UP" : "RECORDING", rec ? "ok" : "warn");
+    } catch (e) { notify(e.message); }
+    deckRefresh();
+  });
+
   $("toggleSys").addEventListener("click", () => {
     const on = $("toggleSys").getAttribute("aria-pressed") !== "true";
     $("toggleSys").setAttribute("aria-pressed", String(on));
@@ -5389,8 +5420,46 @@
             act("Run", () => api("/api/routines/run", { method: "POST", body: JSON.stringify({ name: k }) })));
           return it;
         }), "No routines saved.");
+        const rules = (await api("/api/rules")).rules || [];
+        fill($("agRules"), rules.map(x => {
+          const it = mk("div", "item");
+          it.append(mk("span", "t", x.name), mk("span", "s", x.described + (x.say ? " · “" + x.say + "”" : "")),
+            act("Remove", () => api("/api/rules/delete", { method: "POST", body: JSON.stringify({ which: x.id }) })));
+          return it;
+        }), "No rules yet. Say “Nova, when I open Blender, …”");
+      } else if (name === "work") {
+        const n = await api("/api/notes");
+        const mins = Math.floor((n.seconds || 0) / 60), secs = String((n.seconds || 0) % 60).padStart(2, "0");
+        btnLabel($("notesBtn"), n.recording ? "Stop notes" : "Take notes");
+        $("notesBtn").classList.toggle("danger", !!n.recording);
+        $("notesBtn").dataset.rec = n.recording ? "1" : "";
+        $("notesState").textContent = n.recording ? "Recording “" + n.title + "” · " + mins + ":" + secs
+          : n.working ? "Writing up “" + n.working + "”…"
+          : n.last && n.last.title ? "Last: " + n.last.title + " · " + n.last.minutes + " min · saved in Nova Notes" : "";
+        $("workBadge").hidden = !n.recording;
+        const b = await api("/api/projects");
+        const tone = { SUCCESS: "good", FAILURE: "bad", ERROR: "bad", PENDING: "warn" };
+        const word = { SUCCESS: "passing", FAILURE: "failing", ERROR: "error", PENDING: "running" };
+        fill($("wkProjects"), (b.repos || []).filter(p => !p.missing).map(p => {
+          const it = mk("div", "item");
+          const ci = mk("span", "v " + (tone[p.ci] || ""), word[p.ci] || "");
+          ci.style.cssText = "grid-column:2;grid-row:1 / span 2;font:500 11.5px var(--mono)";
+          if (tone[p.ci] === "good") ci.style.color = "#7df0c4";
+          if (tone[p.ci] === "bad") ci.style.color = "var(--alert)";
+          if (tone[p.ci] === "warn") ci.style.color = "#ff9be6";
+          it.append(mk("span", "t", p.name + (p.prs ? " · " + p.prs + (p.prs === 1 ? " PR" : " PRs") : "")),
+                    mk("span", "s", (p.ago ? p.ago + " · " : "") + p.last), ci);
+          return it;
+        }), b.note || "No projects listed.");
       } else if (name === "system") {
-        const [p, j] = await Promise.all([api("/api/presence"), api("/api/jobs")]);
+        const [p, j, pc] = await Promise.all([api("/api/presence"), api("/api/jobs"), api("/api/pc")]);
+        const pcRows = [];
+        const pcRow = (k, v, tone) => { const r = mk("div", "readout"); r.append(mk("span", "k", k), mk("span", "v " + (tone || ""), v)); pcRows.push(r); };
+        if (pc.ram != null && pc.ram > 0) pcRow("Memory", pc.ram + "%", pc.ram >= 90 ? "bad" : pc.ram >= 80 ? "warn" : "");
+        if (pc.cpu != null && pc.ram > 0) pcRow("Processor", pc.cpu + "%", pc.cpu >= 92 ? "bad" : "");
+        if (pc.gpu_c != null) pcRow("Graphics card", pc.gpu_c + " °C", pc.gpu_c >= 86 ? "bad" : pc.gpu_c >= 78 ? "warn" : "");
+        (pc.drives || []).forEach(d => pcRow("Drive " + d.drive, d.free_gb + " GB free", d.free_percent < 8 ? "bad" : d.free_percent < 15 ? "warn" : ""));
+        fill($("sysPc"), pcRows, "—");
         const up = Object.entries(j.engines || {}).filter(([, v]) => v.available).map(([k]) => brainName(k));
         $("tEngines").textContent = up.length ? up.join(" · ") : "none";
         $("tEngines").className = "v " + (up.length >= 2 ? "good" : up.length ? "warn" : "bad");

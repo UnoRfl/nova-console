@@ -98,7 +98,9 @@ class Usage:
     The subscriptions do not expose a remaining balance, so this counts what
     Nova herself spends: requests, and the dollar-equivalent the Claude CLI
     reports per turn. The ceilings are yours to set in config.json under
-    "budget"; crossing 70% and 90% is announced once each per day.
+    "budget"; crossing 80%, 95% and 100% is announced once each per day. Past
+    100% the bridge stops sending requests to Claude and routes to Codex or
+    the local model instead (Backend.over_budget), rather than refusing.
     """
 
     DEFAULT = {"claude_daily_usd": 6.0, "codex_daily_jobs": 20}
@@ -128,11 +130,15 @@ class Usage:
             warn = None
             if engine == "claude":
                 frac = e["usd"] / max(0.01, float(self.limits["claude_daily_usd"]))
-                for mark in (0.9, 0.7):
+                for mark in (1.0, 0.95, 0.8):
                     key = f"claude-{int(mark * 100)}"
                     if frac >= mark and key not in data["warned"]:
-                        data["warned"] += [key, "claude-70"] if mark == 0.9 else [key]
-                        warn = (f"Sir, I have used about {int(frac * 100)} percent of "
+                        data["warned"] += [f"claude-{m}" for m in (80, 95, 100) if m <= mark * 100
+                                           and f"claude-{m}" not in data["warned"]]
+                        warn = ("Sir, today's Claude allowance is used up. I will carry on with the "
+                                "other brains until midnight; they are slower at real work."
+                                if mark == 1.0 else
+                                f"Sir, I have used about {int(frac * 100)} percent of "
                                 "today's Claude allowance.")
                         break
             try:
