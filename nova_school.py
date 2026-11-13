@@ -42,11 +42,11 @@ DEFAULTS = {
     "city": "your city",
     "pages": [],                 # [{"name": "...", "url": "https://www.facebook.com/..."}]
     "searches": [],              # Google queries, e.g. '"Your City" ("walang pasok" OR "class suspension")'
-    "page_minutes": 20,          # how often the Facebook pages are read (4am-11pm)...
-    "busy_minutes": 5,           # ...and this often in the busy hours, so he hears before school
+    "page_minutes": 120,         # how often the Facebook pages are read (4am-11pm); Sir: every 2 h...
+    "busy_minutes": 120,         # ...and in the busy hours (was 5; the tab pulled him out of games)
     "busy_hours": "06:00-12:00",
     "announce_all_posts": False, # Sir: posts only when he asks; suspensions/holidays still spoken
-    "search_minutes": 60,        # how often Google is asked (kept low: captchas)
+    "search_minutes": 120,       # how often Google is asked (kept low: captchas)
     "morning": "05:30",          # "no school today" is said from this time on
     "evening": "20:00",          # "no school tomorrow" heads-up
 }

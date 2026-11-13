@@ -53,6 +53,53 @@ def _port_up(port: int) -> bool:
     with socket.socket() as s:
         s.settimeout(0.3)
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _foreground() -> int:
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:                                 # noqa: BLE001
+        return 0
+
+
+def _exe_of(hwnd: int) -> str:
+    import ctypes
+    from ctypes import wintypes
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)   # QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(520)
+        n = wintypes.DWORD(520)
+        ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))
+        return buf.value.lower() if ok else ""
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+
+
+def _give_back_focus(before: int) -> None:
+    """A background read must never take focus (Sir games). If her Chrome
+    became the foreground window, give it back to whatever he had, and
+    minimise her window again. Anything else he switched to is left alone."""
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        now = _foreground()
+        if not before or now == before or not now or not u.IsWindow(before):
+            return
+        if not _exe_of(now).endswith("\\chrome.exe") or _exe_of(before).endswith("\\chrome.exe"):
+            return
+        u.ShowWindow(now, 7)                          # SW_SHOWMINNOACTIVE
+        u.keybd_event(0x12, 0, 0, 0)                  # Alt tap grants foreground rights
+        u.keybd_event(0x12, 0, 0x0002, 0)
+        u.SetForegroundWindow(before)
+    except Exception:                                 # noqa: BLE001
+        pass
+
+
 CAPTCHA = re.compile(r"(?:unusual traffic|are you a robot|not a robot|captcha|verify you are human|"
                      r"confirm this search was made by a human)", re.I)
 MAX_TEXT = 6000
@@ -271,8 +318,21 @@ class Hands:
     def do_scan(self, url: str, scrolls: int = 2) -> dict:
         """Background read for the school-notice watcher: its own tab (never the
         one he is looking at), no clicks, no taint (the text goes to a toolless
-        judge, not to her), closed again afterwards."""
-        page = self.browser().new_page()
+        judge, not to her), closed again afterwards.
+        Sir, 2026-11-13: it must never pull him out of a game. The tab is made
+        as a BACKGROUND target (Chrome's window is not activated or restored),
+        and if focus still moved to her Chrome, it is handed straight back."""
+        fg_before = _foreground()
+        ctx = self.browser()
+        page = None
+        try:
+            sess = self.cdp.new_browser_cdp_session()
+            with ctx.expect_page(timeout=10000) as info:
+                sess.send("Target.createTarget", {"url": "about:blank", "background": True})
+            page = info.value
+        except Exception:                             # noqa: BLE001 -- old Chrome: plain tab
+            page = page or ctx.new_page()
+        _give_back_focus(fg_before)
         try:
             page.goto(url, wait_until="domcontentloaded")
             self._settle(page)
@@ -292,6 +352,7 @@ class Hands:
                 page.close()
             except Exception:                         # noqa: BLE001
                 pass
+            _give_back_focus(fg_before)
 
     def do_search(self, query: str, show: bool = False) -> dict:
         return self.do_open("https://www.google.com/search?hl=en&q=" + urllib.parse.quote_plus(query), show)
