@@ -67,6 +67,8 @@ TIERS = {
     "clipboard_write": "announce", "save_note": "announce", "delete_rule": "announce",
     "notes_start": "announce", "notes_stop": "announce",
     "save_rule": "confirm",       # a new standing behaviour, like save_routine
+    "web_research": "free", "web_find": "free", "web_text": "free", "web_extract": "free",
+    "list_page_watches": "free", "watch_page": "announce", "stop_page_watch": "announce",
     "class_schedule": "free", "school_days": "free", "stock_quote": "free",
     "spotify_play": "announce",
     # Hands. Looking and reading are free. Driving her own sandboxed Chrome is
@@ -1162,7 +1164,83 @@ def notes_stop() -> str:
     return r.get("error") or f"Stopped after {r['minutes']} minutes; writing it up now."
 
 
-ALL = [briefing, read_screen, save_rule, list_rules, delete_rule, project_status, clipboard_read, clipboard_write,
+# ---- nova_web: looking things up without opening a window
+
+def _web_render(url: str) -> str:
+    return _hands("scan", timeout=60, url=url, scrolls=1).get("text") or ""
+
+
+def _web_serp(query: str) -> list:
+    return _hands("serp", timeout=45, query=query).get("results") or []
+
+
+def _outside(src: str) -> str:
+    bridge("/api/taint", {"source": src})             # the rest of this turn is held to free actions
+    return UNTRUSTED.format(src=src)
+
+
+def web_research(question: str, pages: int = 4) -> str:
+    """THE way to look something up: searches, reads the top pages at once in the
+    background (no window opens) and returns only the passages that bear on the question,
+    numbered with their sources. Use it before web_search/web_open; cite the numbers."""
+    import nova_web
+    found = nova_web.research(question, max(1, min(6, int(pages))), via_browser=_web_render,
+                              search_browser=_web_serp)
+    return _outside("the web") + nova_web.digest(found) + f"\n\n({found['seconds']} s)"
+
+
+def web_find(query: str, limit: int = 8) -> str:
+    """Search results only (title, address, snippet), no pages read and no window opened."""
+    import nova_web
+    rows = nova_web.search(query, max(1, min(12, int(limit))), via_browser=_web_serp)
+    if not rows:
+        return "The search came back empty."
+    return _outside("search results") + "\n".join(f"- {r['title']}\n  {r['url']}\n  {r['snippet'][:200]}" for r in rows)
+
+
+def web_text(url: str, about: str = "", max_chars: int = 6000) -> str:
+    """One page (or PDF) as clean text with menus and adverts removed, read in the background.
+    about: keep only the passages on that subject. For pages needing Sir's login use web_open."""
+    import nova_web
+    page = nova_web.fetch(url, via_browser=_web_render)
+    if page.get("error"):
+        return "Could not read it: " + page["error"]
+    paras = nova_web.best_passages(page["paras"], about, max_chars) if about else page["paras"]
+    text = "\n".join(paras)
+    return (_outside(nova_web.host(page["url"])) + (page.get("title") or "") + "\n" + page["url"] + "\n\n"
+            + text[:max_chars] + (" [cut]" if len(text) > max_chars else ""))
+
+
+def web_extract(urls: list[str], fields: list[str]) -> str:
+    """The same named fields (e.g. ["name", "price", "in stock"]) from several pages, as
+    rows. Read by the free local model, so check anything that matters."""
+    import nova_web
+    rows = nova_web.extract_fields(list(urls or []), list(fields or []), via_browser=_web_render)
+    return _outside("the web") + json.dumps(rows, ensure_ascii=False, indent=1)[:9000]
+
+
+def watch_page(url: str, what: str = "", every_minutes: int = 30) -> str:
+    """Tell Sir when a web page changes (a price, a notice, a result). what: the part that
+    matters, in a few words. Checked by comparing text on a timer: costs nothing."""
+    r = bridge("/api/webwatch/add", {"url": url, "what": what, "every_minutes": every_minutes})
+    return r.get("error") or f"Watching {r['url']} every {int(r['every'] // 60)} minutes."
+
+
+def list_page_watches() -> str:
+    """The web pages being watched for changes."""
+    rows = bridge("/api/webwatch").get("watches") or []
+    return "\n".join(f"- {w['url']}" + (f" ({w['what']})" if w.get("what") else "")
+                     + f", every {int(w['every'] // 60)} min" for w in rows) or "No pages are being watched."
+
+
+def stop_page_watch(which: str) -> str:
+    """Stop watching a page, by words from its address or subject. "all" stops every one."""
+    gone = bridge("/api/webwatch/stop", {"which": which}).get("stopped") or []
+    return "Stopped watching: " + ", ".join(g["url"] for g in gone) if gone else "No matching page watch."
+
+
+ALL = [web_research, web_find, web_text, web_extract, watch_page, list_page_watches, stop_page_watch,
+       briefing, read_screen, save_rule, list_rules, delete_rule, project_status, clipboard_read, clipboard_write,
        save_note, recent_files, notes_start, notes_stop,
        class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read, gmail_send, gmail_reply,

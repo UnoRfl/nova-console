@@ -4750,6 +4750,7 @@
       clearInterval(actTimer);
       await pumpActivity();                  // catch the last few events
       if (lastAct) lastAct.classList.remove("running");
+      await syncOrb(true);                   // this turn was ours: do not show it twice
       state.busy = false;
       state.abort = null;
       els.send.disabled = false;
@@ -5406,12 +5407,19 @@
           return it;
         }), "Nothing running.");
         $("agendaBadge").hidden = !running.length;
+        const pagesWatched = ((await api("/api/webwatch")).watches || []).map(x => {
+          const it = mk("div", "item");
+          it.append(mk("span", "t", x.what || x.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 60)),
+            mk("span", "s", "web page · every " + Math.round((x.every || 1800) / 60) + " min"),
+            act("Stop", () => api("/api/webwatch/stop", { method: "POST", body: JSON.stringify({ which: x.id }) })));
+          return it;
+        });
         fill($("agOrders"), (o.orders || []).map(x => {
           const it = mk("div", "item");
           it.append(mk("span", "t", x.what), mk("span", "s", "every " + Math.round((x.every || 600) / 60) + " min"),
             act("Stop", () => api("/api/orders/cancel", { method: "POST", body: JSON.stringify({ which: x.id }) })));
           return it;
-        }), "Not watching anything.");
+        }).concat(pagesWatched), "Not watching anything.");
         fill($("agRoutines"), Object.keys(rt.routines || {}).map(k => {
           const it = mk("div", "item");
           const say = (rt.routines[k] || [])[0];
@@ -5497,6 +5505,46 @@
       els.tBridge.textContent = "unreachable"; els.tBridge.className = "v bad";
     }
   }, 15000);
+
+  // ------------------------------------------------------------- orb sync
+  // The orb in the corner and this panel are one Nova: whatever the orb shows
+  // (listening, thinking, speaking, waiting on a yes), the core here shows
+  // too, even when the request came by voice, from the phone or from her own
+  // initiative and this panel had no part in it. While this panel is running
+  // a request of its own it already knows better than a poll, so it leads.
+  const ORB_MODE = { listening: "listening", thinking: "thinking", speaking: "speaking", approval: "tool", offline: "offline" };
+  const ORB_LABEL = { approval: "Your call" };
+  async function syncOrb(quiet) {
+    let o;
+    try { o = await api("/api/orb?panel=1"); } catch (e) { return; }
+    if (typeof o.turn === "number") {
+      if (state.orbTurn != null && o.turn !== state.orbTurn && !quiet && o.last) {
+        // An exchange this panel did not carry: show it as if it had.
+        const said = String(o.last.user || "").replace(/\s*\(on my screen\)$/, "");
+        const reply = splitProjection(String(o.last.reply || "")).prose || String(o.last.reply || "");
+        els.heard.textContent = said;
+        els.heard.classList.remove("interim");
+        els.spoken.textContent = reply;
+        logTurn("user", said);
+        logTurn("assistant", reply);
+        state.exchanges++;
+        els.tTurns.textContent = state.exchanges;
+      }
+      state.orbTurn = o.turn;
+    }
+    if (quiet || state.busy || state.localSpeaking || state.recognizing || state.wakeListening) return;
+    const want = ORB_MODE[o.mode];
+    if (want) {
+      if (want === "speaking") state.speakEnv = Math.min(1, 0.25 + (o.level || 0) * 5);
+      if (state.mode !== want || !state.orbLed) setMode(want, ORB_LABEL[o.mode]);
+      state.orbLed = true;
+    } else if (state.orbLed) {
+      state.orbLed = false;
+      state.speakEnv = 0;
+      if (["listening", "thinking", "speaking", "tool", "offline"].includes(state.mode)) setMode("idle");
+    }
+  }
+  setInterval(() => { if (!document.hidden) syncOrb(false); }, 450);
 
   // ------------------------------------------------------------- boot
   (async function boot() {

@@ -405,6 +405,57 @@ class Hands:
                 pass
             _give_back_focus(fg_before)
 
+    def do_serp(self, query: str, limit: int = 10) -> dict:
+        """Search results as data, for nova_web: Google in a BACKGROUND tab of
+        her own signed-in Chrome (plain HTTP search endpoints all refuse
+        scripts now), nothing shown, nothing clicked, focus handed straight
+        back, tab closed afterwards. Returns {results: [{title, url, snippet}]}."""
+        fg_before = _foreground()
+        ctx = self.browser()
+        page = None
+        try:
+            sess = self.cdp.new_browser_cdp_session()
+            with ctx.expect_page(timeout=10000) as info:
+                sess.send("Target.createTarget", {"url": "about:blank", "background": True})
+            page = info.value
+        except Exception:                             # noqa: BLE001 -- old Chrome: plain tab
+            page = page or ctx.new_page()
+        _give_back_focus(fg_before)
+        try:
+            page.goto("https://www.google.com/search?hl=en&num=12&q=" + urllib.parse.quote_plus(query),
+                      wait_until="domcontentloaded")
+            try:
+                page.wait_for_selector("a h3", timeout=8000)
+            except Exception:                         # noqa: BLE001 -- a captcha or an empty page
+                return {"results": [], "url": page.url,
+                        "note": "captcha" if "sorry" in page.url else "no results"}
+            rows = page.evaluate(r"""(limit) => {
+              const out = [], seen = new Set();
+              for (const h of document.querySelectorAll('a h3')) {
+                const a = h.closest('a');
+                if (!a || !/^https?:/.test(a.href) || /google\.[a-z.]+\/(search|url\?q=\/)/.test(a.href)) continue;
+                if (seen.has(a.href)) continue;
+                seen.add(a.href);
+                let box = a, snip = '';
+                for (let i = 0; i < 6 && box.parentElement; i++) {
+                  box = box.parentElement;
+                  const lines = (box.innerText || '').split('\n').map(s => s.trim())
+                    .filter(s => s.length > 70 && s !== h.innerText);
+                  if (lines.length) { snip = lines[0]; break; }
+                }
+                out.push({ title: h.innerText.trim(), url: a.href, snippet: snip.slice(0, 320) });
+                if (out.length >= limit) break;
+              }
+              return out;
+            }""", int(limit))
+            return {"results": rows, "url": page.url}
+        finally:
+            try:
+                page.close()
+            except Exception:                         # noqa: BLE001
+                pass
+            _give_back_focus(fg_before)
+
     def do_search(self, query: str, show: bool = False) -> dict:
         return self.do_open("https://www.google.com/search?hl=en&q=" + urllib.parse.quote_plus(query), show)
 

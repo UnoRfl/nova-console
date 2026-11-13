@@ -85,6 +85,9 @@ if os.environ.get("NOVA_TEST"):
     nova_extras.STATE_FILE = STATE / "extras-state.json"
     nova_extras.RULES_FILE = STATE / "rules.json"
     nova_extras.NOTES_DIR = STATE / "notes"
+    import nova_web
+    nova_web.CACHE_DB = STATE / "web-cache.db"
+    nova_web.WATCH_FILE = STATE / "web-watches.json"
 
 # How long a wake signal stays claimable. Long enough for a cold browser
 # launch, short enough that a stale one never arms the mic out of nowhere.
@@ -249,7 +252,8 @@ PRIVATE_TOOLS = {"messenger_chats", "messenger_read", "gmail_inbox", "gmail_read
                  "list_windows", "foreground_app", "look_at_this", "day_log", "recall",
                  "read_screen", "clipboard_read", "clipboard_write", "save_note", "recent_files",
                  "notes_start", "notes_stop", "briefing", "project_status", "list_rules", "save_rule",
-                 "delete_rule"}
+                 "delete_rule", "web_research", "web_find", "web_text", "web_extract", "watch_page",
+                 "list_page_watches", "stop_page_watch"}
 
 
 def nova_tool_names(*tiers: str) -> list[str]:
@@ -375,6 +379,11 @@ this reply ends. You check it yourself on a timer and speak when it changes.
 time of day, him coming back) is a rule: save it with save_rule, which costs
 nothing until it fires. To read what is on his screen use read_screen (text,
 cheap) before a screenshot. Meeting or lecture notes: notes_start, notes_stop.
+To look anything up, use web_research first: it reads several pages in the
+background and hands you the relevant passages with numbered sources, so say
+where a fact came from ("according to source 2, ..."). Open her Chrome
+(web_open, web_search) only for a site that needs his login or a click, or
+when he asks to SEE the page. "Tell me when this page changes" is watch_page.
 If you see something he would want to know while doing something else (a
 failing server, a full disk, a job that ended badly), say so in one sentence
 at the end of your reply. If you think he is about to make a mistake, say so
@@ -2292,9 +2301,18 @@ class Handler(BaseHTTPRequestHandler):
             # One word for what she is doing, for the on-screen orb.
             voice = nova_voice.shared() if nova_voice else None
             mode = self.server.mode()
-            self.send_json({"mode": mode, "level": voice.level if voice else 0.0,
-                            "brain": self.server.backend.brain,
-                            "jobs": sum(1 for j in self.server.jobs.list() if j["state"] == "running")})
+            out = {"mode": mode, "level": voice.level if voice else 0.0,
+                   "brain": self.server.backend.brain,
+                   "jobs": sum(1 for j in self.server.jobs.list() if j["state"] == "running")}
+            if "panel=1" in self.path:
+                # The dashboard mirrors the orb, and also shows the last
+                # exchange when it happened by voice with no panel involved.
+                b = self.server.backend
+                last = b.recent[-1] if b.recent else None
+                out["turn"] = b.turn_no
+                if last:
+                    out["last"] = {"user": str(last["user"])[:600], "reply": str(last["reply"])[:1200]}
+            self.send_json(out)
             return
 
         if route == "/api/routines":
@@ -2337,6 +2355,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/notes":
             self.send_json(self.server.notes.status())
+            return
+
+        if route == "/api/webwatch":
+            import nova_web
+            self.send_json({"watches": [{k: w.get(k) for k in ("id", "url", "what", "every", "checked", "changed")}
+                                        for w in nova_web.load_watches()]})
             return
 
         if route == "/api/pc":
@@ -2618,6 +2642,27 @@ class Handler(BaseHTTPRequestHandler):
             for g in gone:
                 log(f"rule {g['id']} deleted")
             self.send_json({"deleted": gone})
+            return
+
+        if route == "/api/webwatch/add":
+            import nova_web
+            try:
+                every = float(body.get("every_minutes") or 30)
+            except (TypeError, ValueError):
+                every = 30.0
+            item = nova_web.add_watch(str(body.get("url") or ""), str(body.get("what") or ""), every)
+            if "error" not in item:
+                log(f"page watch {item['id']}: {item['url']} ({item['what']}) every {item['every'] / 60:.0f} min")
+                self.server.activity.push("system", "Watching page", item["url"][:120])
+            self.send_json({k: v for k, v in item.items() if k != "lines"})
+            return
+
+        if route == "/api/webwatch/stop":
+            import nova_web
+            gone = nova_web.stop_watch(str(body.get("which") or ""))
+            for g in gone:
+                log(f"page watch {g['id']} stopped")
+            self.send_json({"stopped": [{"id": g["id"], "url": g["url"]} for g in gone]})
             return
 
         if route == "/api/notes/start":

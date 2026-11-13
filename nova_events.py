@@ -501,6 +501,29 @@ class Events:
             self.activity.push("system", "Loose end", item["text"][:120])
         self.announce(self.nx.loop_line(item))
 
+    def check_pages(self) -> None:
+        """Web pages he asked to be told about (nova_web watches). The reading
+        is slow next to a tick, so it runs in its own thread, one at a time."""
+        if getattr(self, "pages_busy", False):
+            return
+        self.pages_busy = True
+
+        def work():
+            try:
+                import nova_tools
+                import nova_web
+                for line in nova_web.check_watches(via_browser=nova_tools._web_render):
+                    if self.activity:
+                        self.activity.push("system", "Page changed", line[:140])
+                    self.announce(line, push=True)
+            except Exception as exc:                  # noqa: BLE001
+                if self.activity:
+                    self.activity.push("system", "Page watch error", f"{type(exc).__name__}: {exc}"[:160])
+            finally:
+                self.pages_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+
     def check_projects(self) -> None:
         board = self.nx.project_board()
         if not board.get("repos"):
@@ -815,6 +838,7 @@ class Events:
                     self.check_school()
                     if not TESTING:
                         self.check_health()
+                        self.check_pages()
                 if tick % 60 == 30:                   # every ten minutes
                     self.check_prs()
                     if not TESTING:
