@@ -25,15 +25,30 @@
   button { border:0; border-radius:50%; width:48px; height:48px; flex:none; font-size:20px;
     background:var(--accent); color:#16092e; }
   #talk.rec { background:var(--ok); animation:pulse 1s infinite; }
+  #screenBtn { margin-left:8px; width:auto; height:32px; padding:0 12px; border-radius:16px; font-size:13px;
+    background:var(--panel); color:var(--text); border:1px solid var(--line); }
+  #screen { position:fixed; inset:0; background:rgba(5,2,12,.94); display:none; flex-direction:column;
+    padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); z-index:5; }
+  #screen.on { display:flex; }
+  #screen .bar { display:flex; gap:8px; padding:12px 16px; align-items:center; }
+  #screen .bar span { flex:1; color:var(--dim); font-size:13px; }
+  #screen .bar button { width:auto; height:36px; padding:0 14px; border-radius:18px; font-size:14px; }
+  #screen .view { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; }
+  #screen img { width:100%; display:block; }
   button:disabled { opacity:.45; }
   @keyframes pulse { 50% { transform:scale(1.12); } }
   @media (prefers-reduced-motion: reduce) { #talk.rec { animation:none; } }
 </style>
 </head>
 <body>
-<header><b>NOVA</b><span id="status">connecting…</span></header>
+<header><b>NOVA</b><span id="status">connecting…</span><button id="screenBtn" hidden>Screen</button></header>
 <div id="log">
-  <div class="note">You are away from the desk, so Nova can look things up and answer,<br>but will not change anything on the PC from here.</div>
+  <div class="note" id="modeNote">Checking what this phone may do…</div>
+</div>
+<div id="screen" role="dialog" aria-label="PC screen">
+  <div class="bar"><span id="shotTime">PC screen</span>
+    <button id="shotRefresh">Refresh</button><button id="shotClose">Close</button></div>
+  <div class="view"><img id="shot" alt="The PC screen"></div>
 </div>
 <footer>
   <button id="talk" aria-label="Hold to talk">🎙</button>
@@ -128,8 +143,24 @@
   talk.addEventListener("pointerleave", stopRec);
   talk.addEventListener("contextmenu", (e) => e.preventDefault());
 
+  // The PC screen, for Sir's own phone only (the bridge checks his Tailscale login).
+  const screenBox = $("screen"), shot = $("shot");
+  function loadShot() {
+    $("shotTime").textContent = "loading…";
+    shot.onload = () => { $("shotTime").textContent = "PC screen · " + new Date().toLocaleTimeString(); };
+    shot.onerror = () => { $("shotTime").textContent = "could not load the screen"; };
+    shot.src = "/api/phone/screen?token=" + encodeURIComponent(TOKEN) + "&t=" + Date.now();
+  }
+  $("screenBtn").addEventListener("click", () => { screenBox.classList.add("on"); loadShot(); });
+  $("shotRefresh").addEventListener("click", loadShot);
+  $("shotClose").addEventListener("click", () => screenBox.classList.remove("on"));
+
   api("/api/health").then(h => {
     status.textContent = h.error ? "offline" : "ready · " + (h.brain === "local" ? "local brain" : "Claude");
+    $("modeNote").innerHTML = h.owner
+      ? "Full control. Nova can read your messages and email and work your PC from here.<br>Nothing is spoken at the desk."
+      : "You are away from the desk, so Nova can look things up and answer,<br>but will not change anything on the PC from here.";
+    $("screenBtn").hidden = !h.owner;
   }).catch(() => { status.textContent = "offline"; });
 </script>
 </body>

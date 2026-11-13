@@ -100,6 +100,8 @@ TOOLS = re.compile(_words(
     r"lights?", r"rgb", r"download", r"install", r"uninstall", r"update",
     r"send", r"message", r"post", r"website", r"url", r"link", r"github", r"repo",
     r"memory of", r"do you remember", r"what did i",
+    r"messages", r"texted?", r"chats?", r"whatsapp", r"messenger", r"gmail", r"inbox", r"emails", r"mails?",
+    r"mom", r"mommy", r"mum", r"sent me", r"replied", r"settings?", r"browser", r"chrome", r"tab", r"click", r"class(?:es)?",
     # Doing something to a window, a tab, the panel or a screen is an action:
     # the local chat model cannot act and must never get these.
     r"remove", r"hide", r"dismiss", r"minimi[sz]e", r"maximi[sz]e", r"move", r"delete",

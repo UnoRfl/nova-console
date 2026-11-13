@@ -232,6 +232,14 @@ def write_mcp_config() -> str:
     return str(MCP_CONFIG)
 
 
+# His mail, chats, screen and the hands: only for Sir himself (desk, voice, his
+# own phone login), never the read-only remote or public sessions.
+PRIVATE_TOOLS = {"messenger_chats", "messenger_read", "gmail_inbox", "gmail_read", "whatsapp_chats",
+                 "whatsapp_read", "desktop_look", "web_search", "web_open", "web_read", "web_tabs",
+                 "web_screenshot", "web_scroll", "web_back", "web_show", "capture_screen",
+                 "list_windows", "foreground_app", "look_at_this", "day_log", "recall"}
+
+
 def nova_tool_names(*tiers: str) -> list[str]:
     try:
         import nova_tools
@@ -580,7 +588,56 @@ online. If asked for anything else that would need access, say you cannot do tha
 Do not say which AI model or company you are built on."""
 
 CHANNELS = {"panel": "owner", "voice": "owner", "phone": "remote", "pocket": "remote",
-            "discord": "public", "public": "public"}
+            "phone-owner": "owner", "discord": "public", "public": "public"}
+
+
+_hands_proc = {"p": None}
+
+
+def ensure_hands() -> dict:
+    """Start nova_hands.py (her Chrome service) if it is not answering."""
+    import socket
+    with socket.socket() as sock:
+        sock.settimeout(0.3)
+        if sock.connect_ex(("127.0.0.1", 8783)) == 0:
+            return {"ok": True, "started": False}
+    exe = ROOT / "venv" / "Scripts" / "pythonw.exe"
+    if not exe.is_file():
+        exe = Path(sys.executable)
+    try:
+        _hands_proc["p"] = subprocess.Popen([str(exe), str(ROOT / "nova_hands.py")], cwd=str(ROOT),
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL, creationflags=0x08000000)
+    except OSError as exc:
+        return {"error": f"could not start nova_hands: {exc}"}
+    for _ in range(40):
+        with socket.socket() as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex(("127.0.0.1", 8783)) == 0:
+                log("started nova_hands (her browser service)")
+                return {"ok": True, "started": True}
+        time.sleep(0.25)
+    return {"error": "nova_hands did not come up within 10 s"}
+
+
+def owner_login(login: str) -> bool:
+    """Is this Tailscale identity Sir himself? config "owner_logins" lists his
+    Tailscale login(s). Tailscale sets the header and the device cannot forge it."""
+    login = (login or "").strip().lower()
+    if not login:
+        return False
+    try:
+        cfgd = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return login in [str(x).strip().lower() for x in cfgd.get("owner_logins") or []]
+
+
+# Untrusted content read during the current request (web page, email, chat).
+# Set by the hands tools through /api/taint, cleared when Sir speaks again;
+# nova_tools.approve refuses risky PC actions while it is set.
+TAINT = {"at": 0.0, "source": ""}
+TAINT_TTL = 15 * 60
 
 
 # A reply that carries something for the projector stage.
@@ -901,8 +958,10 @@ def claude_args(cfg: dict) -> list[str]:
     if channel == "remote":
         # Sir himself, but not at the PC (phone, Pocket Nova). He can look and
         # ask, never change anything: there is nobody at the desk to say yes.
-        args += ["--allowedTools"] + READ_TOOLS + nova_tool_names("free")
-        args += ["--disallowedTools", "Bash", "Write", "Edit", "NotebookEdit"]
+        # Not his own verified login: none of his private mail or chats, no hands.
+        private = {f"mcp__nova__{n}" for n in PRIVATE_TOOLS}
+        args += ["--allowedTools"] + READ_TOOLS + [n for n in nova_tool_names("free") if n not in private]
+        args += ["--disallowedTools", "Bash", "Write", "Edit", "NotebookEdit", *sorted(private)]
         return args
     if cfg.get("power") == "full":
         # Every tool is available, but nothing is auto-approved wholesale any
@@ -1762,7 +1821,7 @@ class Handler(BaseHTTPRequestHandler):
     # do: load the phone page, ask, and send audio to be transcribed. It cannot
     # approve an action, start a job, speak through the PC, take a screenshot,
     # upload a file or change a setting.
-    REMOTE_GET = {"/phone", "/api/health"}
+    REMOTE_GET = {"/phone", "/api/health", "/api/phone/screen"}
     REMOTE_POST = {"/api/ask", "/api/transcribe"}
 
     def remote(self) -> bool:
@@ -1821,7 +1880,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/health":
-            self.send_json(self.server.backend.info())
+            info = dict(self.server.backend.info())
+            # The phone page uses this to say whether it has full control.
+            info["owner"] = (not self.remote()) or owner_login(self.headers.get("Tailscale-User-Login", ""))
+            self.send_json(info)
             return
 
         if route == "/api/probe":
@@ -1904,6 +1966,27 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/orders":
             self.send_json({"orders": self.server.events.orders.list()})
+            return
+
+        if route == "/api/taint":
+            live = TAINT["at"] and time.time() - TAINT["at"] < TAINT_TTL
+            self.send_json({"tainted": bool(live), "source": TAINT["source"] if live else ""})
+            return
+
+        if route == "/api/phone/screen":
+            # What is on the PC screen right now, for Sir's own phone only.
+            if self.remote() and not owner_login(self.headers.get("Tailscale-User-Login", "")):
+                self.send_text(b"Only Sir's own phone may see the screen.", "text/plain; charset=utf-8", 403)
+                return
+            try:
+                import mss
+                import mss.tools
+                with mss.mss() as grab:
+                    shot = grab.grab(grab.monitors[1])
+                    png = mss.tools.to_png(shot.rgb, shot.size)
+                self.send_text(png, "image/png")
+            except Exception as exc:              # noqa: BLE001
+                self.send_text(f"screen capture failed: {exc}".encode(), "text/plain; charset=utf-8", 500)
             return
 
         if route == "/api/presence":
@@ -2087,6 +2170,15 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/jobs/result":
             job = self.server.jobs.get(str(body.get("id") or ""))
             self.send_json(job or {"error": "No such job."})
+            return
+
+        if route == "/api/taint":
+            TAINT.update(at=time.time(), source=str(body.get("source") or "web")[:40])
+            self.send_json({"ok": True})
+            return
+
+        if route == "/api/hands/ensure":
+            self.send_json(ensure_hands())
             return
 
         if route == "/api/reminders":
@@ -2364,9 +2456,18 @@ class Handler(BaseHTTPRequestHandler):
             # forced to "remote" whatever it claims, so a phone can never get
             # the at-the-desk permissions.
             channel = str(body.get("channel") or "panel").lower()
-            if self.headers.get("Tailscale-User-Login") and CHANNELS.get(channel, "public") == "owner":
-                channel = "phone"
+            ts_login = self.headers.get("Tailscale-User-Login", "")
+            if ts_login:
+                # Over Tailscale. Sir's own login gets the desk's full (gated)
+                # Nova, silently; anyone else on the tailnet stays read-only.
+                if owner_login(ts_login):
+                    channel = "phone-owner"
+                    body["speak"] = False
+                elif CHANNELS.get(channel, "public") == "owner":
+                    channel = "phone"
             profile = CHANNELS.get(channel, "public")
+            if profile == "owner":
+                TAINT.update(at=0.0, source="")       # he has spoken in his own words again
             log(f"ask[{channel}]: {prompt[:110]}")
             if profile == "owner":
                 self.in_turn = True                   # released in do_POST
