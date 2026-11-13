@@ -253,8 +253,8 @@ class Orders:
     MAX = 6
     MAX_RUNS = 200
 
-    def __init__(self, path: Path = ORDERS_FILE) -> None:
-        self.path = path
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or ORDERS_FILE     # read at call time, so a test bridge can redirect it
         self.lock = threading.Lock()
 
     def _load(self) -> list[dict]:

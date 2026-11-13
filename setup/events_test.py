@@ -74,7 +74,8 @@ check("cancel by words", len(rem.cancel("later")) == 1 and len(rem.list()) == 1)
 
 # ---- through the bridge: a routine and a reminder answer instantly, no model
 PORT = 8796
-env = dict(os.environ, NOVA_CLAUDE_STUB=str(ROOT / "setup" / "claude_stub.py"),
+TEST_DIR = Path(tempfile.mkdtemp(prefix="nova-test-"))
+env = dict(os.environ, NOVA_TEST_DIR=str(TEST_DIR), NOVA_CLAUDE_STUB=str(ROOT / "setup" / "claude_stub.py"),
            NOVA_VOICE_VOLUME="0", NOVA_TEST="1", PYTHONIOENCODING="utf-8")
 proc = subprocess.Popen([sys.executable, str(ROOT / "nova_bridge.py"), "--port", str(PORT)],
                         cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -115,9 +116,5 @@ finally:
         real.unlink(missing_ok=True)
     else:
         real.write_text(before, encoding="utf-8")
-    import nova_memory as M
-    with M.connect() as db:
-        db.execute("DELETE FROM memory WHERE kind='day' AND text LIKE 'He asked: remind me what we did yesterday%'")
-    (ROOT / "usage.json").unlink(missing_ok=True)
 
 print("RESULT:", "PASS" if all(checks) else "NEEDS WORK")

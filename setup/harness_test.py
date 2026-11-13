@@ -44,7 +44,9 @@ st.flush()
 check("streamer withholds memory markers", got2 == ["Noted, Sir."], str(got2))
 
 # ---- integration: a private bridge on a spare port
-env = dict(os.environ, NOVA_CLAUDE_STUB=str(ROOT / "setup" / "claude_stub.py"),
+import tempfile
+TEST_DIR = Path(tempfile.mkdtemp(prefix="nova-test-"))   # the test bridge writes only here
+env = dict(os.environ, NOVA_TEST_DIR=str(TEST_DIR), NOVA_CLAUDE_STUB=str(ROOT / "setup" / "claude_stub.py"),
            NOVA_VOICE_VOLUME="0", NOVA_TEST="1", PYTHONIOENCODING="utf-8")
 proc = subprocess.Popen([sys.executable, str(ROOT / "nova_bridge.py"), "--port", str(PORT)],
                         cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -105,8 +107,6 @@ try:
     spoke = api("/api/speak", {"text": r["text"], "streamed": True}, timeout=120)
     check("marker stripped and stored", "[[" not in r["text"] and r.get("remembered"), str(r.get("remembered")))
     check("marker not spoken", spoke.get("spoken") == 2, str(spoke))
-    import nova_memory
-    nova_memory.forget_matching("favourite test colour teal")
 
     # 4. a tool turn gets an acknowledgement first
     r = api("/api/ask", {"model": "haiku", "prompt": "use a tool to check the pc", "speak": True})
@@ -126,16 +126,6 @@ try:
     check("unknown engine is refused cleanly", "error" in bad, bad.get("error", ""))
 finally:
     proc.kill()
-    # Leave no trace of the test in the real diary or the real usage tally.
-    import sqlite3
-    import nova_memory as M
-    with M.connect() as db:
-        db.execute("DELETE FROM memory WHERE kind='day' AND at >= ?", (STARTED,))
-    try:
-        usage = json.loads((ROOT / "usage.json").read_text(encoding="utf-8"))
-        if abs(usage["engines"].get("claude", {}).get("usd", 0) - 0.0123 * usage["engines"]["claude"]["requests"]) < 1e-6:
-            (ROOT / "usage.json").unlink()
-    except (OSError, ValueError, KeyError):
-        pass
+    # It wrote only to TEST_DIR, so there is nothing live to clean up.
 
 print("RESULT:", "PASS" if all(checks) else "NEEDS WORK")

@@ -121,6 +121,11 @@ CODE = re.compile(
     r"[^.?!]{0,40}\b(?:script|program|code|app|website|site|function|class|bot|mod|plugin|api|"
     r"bug|error|crash|exception|datapack|luau?|python|javascript|typescript|html|css|sql|"
     r"powershell|batch file|regex|component|endpoint|game)\b|"
+    # "open a new python script that ..." starts writing code. Narrower noun
+    # list on purpose: "start a new game" or "open a new tab" are not code.
+    r"\b(?:open|start|begin|spin up)\s+(?:up\s+)?(?:a\s+)?(?:new|fresh|blank)\b[^.?!]{0,25}"
+    r"\b(?:script|program|project|function|class|bot|mod|plugin|datapack|python|javascript|"
+    r"typescript|powershell|luau?)\b|"
     r"\b(?:stack ?trace|traceback|syntax error|compile error|won'?t compile|pull request|merge conflict)\b")
 
 # 5. Heuristic markers for when no classifier is available.

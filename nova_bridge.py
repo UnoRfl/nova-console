@@ -55,6 +55,26 @@ CONFIG_FILE = ROOT / "config.json"
 HUD_FILE = ROOT / "hud.html"
 LOG_FILE = ROOT / "bridge.log"
 
+# A test bridge (NOVA_TEST=1) reads the live token, config, models and voice,
+# but everything it WRITES goes to a throwaway folder: its log, memory, usage
+# tally, reminders, jobs, standing orders and outbox. Before this, every test
+# run left fake requests ("show me a shape", "hunter2") in the real bridge.log
+# and could add rows to the real memory. NOVA_TEST_DIR pins the folder.
+STATE = ROOT
+if os.environ.get("NOVA_TEST"):
+    import tempfile
+    STATE = Path(os.environ.get("NOVA_TEST_DIR") or tempfile.mkdtemp(prefix="nova-test-"))
+    STATE.mkdir(parents=True, exist_ok=True)
+    LOG_FILE = STATE / "bridge.log"
+    nova_memory.DB_FILE = STATE / "memory.db"
+    nova_harness.JOBS_FILE = STATE / "jobs.json"
+    nova_harness.USAGE_FILE = STATE / "usage.json"
+    nova_harness.JOBS_DIR = STATE / "jobs"
+    nova_events.REMINDERS_FILE = STATE / "reminders.json"
+    nova_initiative.ORDERS_FILE = STATE / "orders.json"
+    nova_initiative.WATCH_STATE = STATE / "watch-state.json"
+    nova_presence.BASELINE_FILE = STATE / "lights-baseline.json"
+
 # How long a wake signal stays claimable. Long enough for a cold browser
 # launch, short enough that a stale one never arms the mic out of nowhere.
 WAKE_TTL_SECONDS = 20
@@ -2836,7 +2856,7 @@ def main() -> int:
         """Urgent, and he is not at the desk: leave it where the Discord bot will pick it up."""
         if not nova_presence.cfg().get("discord", True):
             return
-        box = ROOT / "outbox"
+        box = STATE / "outbox"
         box.mkdir(exist_ok=True)
         (box / f"{time.time():.3f}.json").write_text(
             json.dumps({"at": time.time(), "text": text[:600]}), encoding="utf-8")

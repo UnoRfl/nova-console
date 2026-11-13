@@ -57,7 +57,11 @@ check("unknown channel names are treated as public", B.CHANNELS.get("whatsapp", 
 
 # ---- through the bridge
 PORT = 8795
-env = dict(os.environ, NOVA_VOICE_VOLUME="0", NOVA_TEST="1", PYTHONIOENCODING="utf-8")
+import tempfile
+TEST_DIR = Path(tempfile.mkdtemp(prefix="nova-test-"))   # the test bridge writes only here
+M.DB_FILE = TEST_DIR / "memory.db"                     # so read its memory, not the live one
+env = dict(os.environ, NOVA_VOICE_VOLUME="0", NOVA_TEST="1", NOVA_TEST_DIR=str(TEST_DIR),
+           PYTHONIOENCODING="utf-8")
 proc = subprocess.Popen([sys.executable, str(ROOT / "nova_bridge.py"), "--port", str(PORT)],
                         cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 token = (ROOT / "token").read_text(encoding="utf-8").strip()
@@ -98,7 +102,7 @@ try:
     check("discord: nothing written to the diary", n == 0, f"{n} rows")
     r = api("/api/ask", {"prompt": "hello there", "channel": "panel"},
             headers={"Tailscale-User-Login": "someone@example.com"})
-    log = (ROOT / "bridge.log").read_text(encoding="utf-8", errors="replace").splitlines()[-6:]
+    log = (TEST_DIR / "bridge.log").read_text(encoding="utf-8", errors="replace").splitlines()[-6:]
     check("a request relayed over Tailscale is forced to the remote profile",
           any("ask[phone]: hello there" in line for line in log))
     # a device coming in over Tailscale is confined to the phone routes
@@ -122,9 +126,6 @@ try:
     check("remote device: the phone page loads", "Ask Nova" in page and "__NOVA_TOKEN__" not in page)
     check("remote device: health is readable", code("/api/health") == 200)
 finally:
-    proc.kill()
-    with M.connect() as db:
-        db.execute("DELETE FROM memory WHERE kind='day' AND at >= ?", (started,))
-    (ROOT / "usage.json").unlink(missing_ok=True)
+    proc.kill()                                          # nothing live to clean up
 
 print("RESULT:", "PASS" if all(checks) else "NEEDS WORK")

@@ -7,6 +7,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.argv = ["x"]
 import nova_bridge as b  # noqa: E402
 import nova_memory as m  # noqa: E402
+import sqlite3  # noqa: E402
+import tempfile  # noqa: E402
+
+# Work on a COPY of the live memory (so core facts and project notes are real)
+# and log to a throwaway file: the test must never write to the live ones.
+TEST_DIR = Path(tempfile.mkdtemp(prefix="nova-test-"))
+with sqlite3.connect(m.DB_FILE) as live, sqlite3.connect(TEST_DIR / "memory.db") as copy:
+    live.backup(copy)
+m.DB_FILE = TEST_DIR / "memory.db"
+b.LOG_FILE = TEST_DIR / "bridge.log"
 
 checks = []
 checks.append(("core facts load", len(b.load_memories()) >= 1))
