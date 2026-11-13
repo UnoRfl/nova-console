@@ -75,5 +75,16 @@ hold("b", 0.1); t.join()
 ok = order == ["a+", "a-", "b+", "b-"]
 bad += not ok
 print(("PASS" if ok else "FAIL"), "one at a time ->", order)
+# Transport controls (no model); bare "stop"/"continue"/"go back" must NOT count.
+for said, want in [("yo can u pause the spotify on my pc", "pause"), ("play it now", "resume"),
+                   ("Nova, pause.", "pause"), ("can you stop the music please", "pause"),
+                   ("skip this song", "next"), ("next song on spotify", "next"),
+                   ("go back a song", "previous"), ("resume", "resume"),
+                   ("stop", None), ("continue", None), ("go back", None), ("stop the server", None),
+                   ("pause the download", None), ("Stop the Spotify control.", None),
+                   ("play the album SOS by SZA", None)]:
+    got = ns.parse_control(said)
+    bad += got != want
+    print(("PASS" if got == want else "FAIL"), "control", repr(said), "->", got)
 print("ALL PASS" if not bad else f"{bad} FAILED")
 sys.exit(1 if bad else 0)

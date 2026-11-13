@@ -5,7 +5,7 @@ Three sources, all free:
   holidays   Google's public "Holidays in the Philippines" calendar (ICS),
              public holidays only, observances dropped; date.nager.at as backup.
   pages      Facebook pages read in her own Chrome (config "school.pages":
-             his school and the his city by default). Signed out,
+             his school's and his city's pages, set in config.json). Signed out,
              Facebook shows only the newest post per page; signed in, the feed.
   search     Google, past 24 hours only, for "walang pasok" / class suspension
              news about his city: needs no Facebook login at all.
@@ -36,14 +36,12 @@ NAGER = "https://date.nager.at/api/v3/PublicHolidays/{year}/PH"
 
 DEFAULTS = {
     "enabled": True,
+    # His real school, city, pages and searches live in config.json "school"
+    # (personal, never published); these are only placeholders.
     "school": "your school",
-    "city": "his city",
-    "pages": [
-        {"name": "his school", "url": "https://www.facebook.com/your-school-page"},
-        {"name": "his city", "url": "https://www.facebook.com/your-city-page"},
-    ],
-    "searches": ['"his city" ("walang pasok" OR "class suspension" OR "suspendido ang klase" OR "no classes")',
-                 '"school" "his city" (suspension OR "walang pasok" OR advisory)'],
+    "city": "your city",
+    "pages": [],                 # [{"name": "...", "url": "https://www.facebook.com/..."}]
+    "searches": [],              # Google queries, e.g. '"Your City" ("walang pasok" OR "class suspension")'
     "page_minutes": 20,          # how often the Facebook pages are read (4am-11pm)...
     "busy_minutes": 5,           # ...and this often in the busy hours, so he hears before school
     "busy_hours": "06:00-12:00",
@@ -414,7 +412,7 @@ def gather(read, now: float | None = None, force: bool = False) -> dict:
 
 
 def post_lines(posts: list[dict]) -> list[str]:
-    """One spoken line per page: "Sir, his school just posted: ..." """
+    """One spoken line per page: "Sir, <page name> just posted: ..." """
     by: dict[str, list[str]] = {}
     for p in posts:
         by.setdefault(p["source"], []).append(p["headline"] or "a new post")

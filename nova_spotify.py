@@ -90,6 +90,92 @@ def parse_request(text: str) -> tuple[str, str] | None:
     return rest, kind
 
 
+# Bare "stop" / "continue" / "go back" are NOT music commands (stop talking,
+# carry on with a task, browser back): those need a music word.
+_MUSIC = r"(?:the\s+|my\s+|this\s+)?(?:music|song|track|spotify|tune|playback)"
+_WHERE = r"(?:\s+(?:on|in)\s+(?:my\s+)?(?:pc|computer|spotify|desktop|laptop))?"
+CONTROLS = (
+    ("pause", re.compile(r"^pause(?:\s+(?:it|" + _MUSIC + r"))?" + _WHERE + r"$")),
+    ("pause", re.compile(r"^(?:stop|hold|mute)\s+" + _MUSIC + _WHERE + r"$")),
+    ("pause", re.compile(r"^(?:stop|pause)\s+playing(?:\s+" + _MUSIC + r")?" + _WHERE + r"$")),
+    ("resume", re.compile(r"^(?:resume|unpause)(?:\s+(?:it|" + _MUSIC + r"))?" + _WHERE + r"$")),
+    ("resume", re.compile(r"^(?:continue|keep playing)\s+" + _MUSIC + _WHERE + r"$")),
+    ("resume", re.compile(r"^play\s+(?:it|the music|spotify|music)(?:\s+(?:again|now|back))*" + _WHERE + r"$")),
+    ("next", re.compile(r"^(?:skip|next)(?:\s+(?:this|the|that)?\s*(?:song|track|one))?" + _WHERE + r"$")),
+    ("next", re.compile(r"^(?:play\s+)?(?:the\s+)?next\s+(?:song|track|one)" + _WHERE + r"$")),
+    ("previous", re.compile(r"^(?:previous|play\s+the\s+(?:previous|last))(?:\s+(?:song|track|one))?" + _WHERE + r"$")),
+    ("previous", re.compile(r"^(?:go\s+back(?:\s+(?:a|one))?|last|back)\s+(?:song|track)" + _WHERE + r"$")),
+)
+
+
+def parse_control(text: str) -> str | None:
+    """"pause the spotify" / "play it now" / "skip this song": pause | resume |
+    next | previous, else None. Only short requests that are nothing but the
+    command count, so "stop the server" or "pause the download" go to the model."""
+    said = re.sub(r"[^a-z' ]+", " ", (text or "").lower().replace("’", "'"))
+    said = " ".join(said.split())
+    said = re.sub(r"^(?:(?:hey|okay|ok|yo|uh|um)\s+)*(?:nova\s+)?", "", said)
+    said = re.sub(r"^(?:(?:please|can you|can u|could you|could u|would you|just)\s+)+", "", said)
+    said = re.sub(r"\s+(?:please|sir|nova|for me|now)$", "", said)
+    if not said or len(said) > 50:
+        return None
+    for action, pat in CONTROLS:
+        if pat.match(said):
+            return action
+    return None
+
+
+def _media_key(vk: int) -> None:
+    u = ctypes.windll.user32
+    u.keybd_event(vk, 0, 1, 0)                         # KEYEVENTF_EXTENDEDKEY
+    u.keybd_event(vk, 0, 1 | 2, 0)                     # ... | KEYEVENTF_KEYUP
+
+
+def control(action: str) -> str:
+    """Pause / resume / next / previous in Sir's Spotify. Pause and resume read
+    the player bar first, so "pause" never toggles paused music back on."""
+    vk = {"next": 0xB0, "previous": 0xB1}.get(action)
+    auto = _auto()
+    with auto.UIAutomationInitializerInThread():
+        win = _window()
+        if vk:
+            before = _now_playing(win) if win else ""
+            _media_key(vk)
+            end = time.time() + 3
+            now = before
+            while time.time() < end and win:
+                time.sleep(0.3)
+                now = _now_playing(_window() or win)
+                if now and now != before:
+                    break
+            word = "Skipped" if action == "next" else "Went back"
+            return f"{word}, Sir" + (f" -- now on: {now}." if now else ".")
+        if win is None:
+            return "Spotify isn't open, Sir."
+        _unminimise(win)
+        bar = _bar(win)
+        if bar is None:                                # bar not found: the key still works
+            _media_key(0xB3)
+            return "Paused, Sir." if action == "pause" else "Playing again, Sir."
+        playing = bar.Name == "Pause"
+        if action == "pause" and not playing:
+            return "It's already paused, Sir."
+        if action == "resume" and playing:
+            return f"It's already playing, Sir -- {_now_playing(win) or 'Spotify'}."
+        _press(bar)
+        if action == "pause":
+            return "Paused, Sir."
+        now = _wait_playing(3) or _now_playing(win)
+        return "Playing again, Sir" + (f" -- {now}." if now and now != "?" else ".")
+
+
+def control_in_child(action: str, timeout: int = 20) -> str:
+    """control() in its own process, like play_in_child."""
+    if action not in ("pause", "resume", "next", "previous"):
+        return "I don't know that Spotify control, Sir."
+    return play_in_child(action, "auto", timeout, control=True)
+
+
 def guess_kind(query: str, kind: str = "auto") -> tuple[str, str]:
     """Pull "album" / "playlist" out of the words if the caller did not say."""
     kind = (kind or "auto").lower()
@@ -484,7 +570,7 @@ def _play(query: str, kind: str = "auto") -> str:
     return f"{head} {label} on Spotify" + (f" -- now on: {now}." if now and now != "?" else ".")
 
 
-def play_in_child(query: str, kind: str = "auto", timeout: int = 75) -> str:
+def play_in_child(query: str, kind: str = "auto", timeout: int = 75, control: bool = False) -> str:
     """play() in its own process (UI Automation wants a clean COM thread, and a
     stuck Spotify window must not hang the bridge or the tool server)."""
     import subprocess
@@ -493,8 +579,9 @@ def play_in_child(query: str, kind: str = "auto", timeout: int = 75) -> str:
     if exe.name.lower() == "pythonw.exe" and exe.with_name("python.exe").exists():
         exe = exe.with_name("python.exe")
     kind = kind if kind in ("auto",) + KINDS else "auto"
+    args = ["--control", query] if control else [query, "--kind", kind]
     try:
-        p = subprocess.run([str(exe), str(Path(__file__).resolve()), query, "--kind", kind],
+        p = subprocess.run([str(exe), str(Path(__file__).resolve()), *args],
                            capture_output=True, text=True, timeout=timeout, encoding="utf-8",
                            errors="replace", stdin=subprocess.DEVNULL, creationflags=0x08000000)
     except subprocess.TimeoutExpired:
@@ -507,11 +594,17 @@ if __name__ == "__main__":
     import argparse
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
-    ap.add_argument("query")
+    ap.add_argument("query", nargs="?", default="")
     ap.add_argument("--kind", default="auto", choices=("auto",) + KINDS)
     ap.add_argument("--find", action="store_true", help="look it up only, play nothing")
+    ap.add_argument("--control", choices=("pause", "resume", "next", "previous"),
+                    help="transport control instead of a search")
     a = ap.parse_args()
-    if a.find:
+    if a.control:
+        out = control(a.control)
+        _log(f"control  {a.control} -> {out}")
+        print(out)
+    elif a.find:
         q, k = guess_kind(a.query, a.kind)
         print(k, find(q, k))
     else:

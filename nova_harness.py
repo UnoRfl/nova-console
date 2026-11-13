@@ -312,10 +312,16 @@ class Jobs:
             # which is what lets Nova say how far along it is. The last line
             # is still the result object _watch reads.
             args = [exe, "-p", task, "--output-format", "stream-json", "--verbose",
-                    "--model", model or "sonnet", "--permission-mode", "acceptEdits"]
+                    "--model", model or "sonnet"]
             mcp = ROOT / "mcp.json"
             if mcp.is_file():
-                args += ["--mcp-config", str(mcp), "--permission-prompt-tool", "mcp__nova__approve"]
+                # Edits go through approve() too (it allows them: ask_first is off),
+                # so the never-list and the taint hold apply to job edits as well.
+                # acceptEdits used to wave every Write/Edit in $HOME straight past it.
+                args += ["--mcp-config", str(mcp), "--strict-mcp-config",
+                         "--permission-prompt-tool", "mcp__nova__approve"]
+            else:
+                args += ["--permission-mode", "acceptEdits"]
             return args
         if engine == "codex":
             exe = codex_exe()

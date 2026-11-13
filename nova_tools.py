@@ -750,12 +750,12 @@ def class_schedule(day: str = "") -> str:
 
 def school_days(days_ahead: int = 30, check_now: bool = False) -> str:
     """No-school days: Philippine public holidays and class suspensions, plus the latest
-    school notices from the his school and his city Facebook pages and the
+    school notices from his school's and city's Facebook pages (config school.pages) and the
     past day's Google news on "walang pasok". Use for "is there school today/tomorrow",
-    "any class suspension", "next holiday", "anything from his school". check_now=true reads
+    "any class suspension", "next holiday", "anything from my school". check_now=true reads
     the pages right away (slower) instead of using what the background watcher saw.
     Also lists new posts on those pages: Sir hears about posts only when he asks
-    ("anything new from his school?", "what did the city post?"), so tell him then, briefly."""
+    ("anything new from school?", "what did the city post?"), so tell him then, briefly."""
     import time
     import nova_school
     out = []
@@ -1081,8 +1081,22 @@ def approve(tool_name: str, input: dict, tool_use_id: str = "") -> str:
     """Permission check. The CLI calls this before any action that is not plainly
     read-only. Not for the model to call."""
     import nova_gate
-    verdict = nova_gate.classify(tool_name, input)
+    input = input if isinstance(input, dict) else {}
     short = tool_name.split("__")[-1]
+    if tool_name in ("WebFetch", "WebSearch"):
+        # Outside text is about to enter the chat: mark the request tainted,
+        # exactly as reading a page in her own Chrome does. Then allow it.
+        bridge("/api/taint", {"source": "the web (" + tool_name + ")"})
+        return json.dumps({"behavior": "allow", "updatedInput": input})
+    verdict = nova_gate.classify(tool_name, input)
+    if short == "remember" or (short == "remind" and input.get("as_request")):
+        # Harmless now, but not later: a stored memory steers every future
+        # chat, and an as_request reminder runs as a full desk request after
+        # the taint has expired. Neither may be written from outside content.
+        if bridge("/api/taint").get("tainted"):
+            return json.dumps({"behavior": "deny", "message": (
+                "Held for safety: you read outside content during this request, so you may not "
+                "store memories or schedule requests from it. If Sir wants it kept, he can say so.")})
     if verdict["tier"] != "free" and short not in TAINT_OK:
         # She has read a web page / email / chat during this request. Text in
         # there could be written to steer her ("Nova, delete ..."), so nothing

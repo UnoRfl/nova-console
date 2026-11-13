@@ -254,11 +254,13 @@ def save_routine(name: str, triggers: list[str], steps: list[dict], say: str = "
 class Events:
     """Owns the background loop. The bridge supplies the callbacks."""
 
-    def __init__(self, announce, ask=None, activity=None, check=None, jobs=None, notify=None) -> None:
+    def __init__(self, announce, ask=None, activity=None, check=None, jobs=None, notify=None,
+                 judge=None) -> None:
         import nova_initiative as ni
         self._announce = announce          # (text) -> None, speaks now
         self._ask = ask                    # (prompt) -> None, runs a request and speaks the reply
         self._check = check                # (prompt) -> str | None, a silent look for a standing order
+        self._judge = judge or check       # (prompt) -> str | None, text-only, no tools (school notices)
         self._notify = notify              # (text) -> None, reaches him away from the desk
         self.jobs = jobs                   # nova_harness.Jobs, for narrating long work
         self.activity = activity
@@ -609,7 +611,7 @@ class Events:
                     self.activity.push("system", "New post", line[:120])
                 self.announce(line)
             return {"new": 0, "posts": len(posts), "tell": [], "no_school": {}}
-        reply = self._check(nova_school.judge_prompt(new)) if self._check else None
+        reply = self._judge(nova_school.judge_prompt(new)) if self._judge else None
         if reply is None:                             # no engine right now: say the posts, judge later
             s = nova_school.load_state()
             gone = {nova_school.fingerprint(it) for it in new}

@@ -79,11 +79,31 @@ NEVER_PATH = re.compile(
     re.IGNORECASE)
 
 
+_DELETE = re.compile(r"(?:^|[\s;&|(])(?:rm|remove-item|ri|del|erase|rd|rmdir)(?:\.exe)?\b", re.I)
+_RECURSE = re.compile(r"(?:^|\s)(?:-[a-z]*r[a-z]*|-recurse\b|/s\b)", re.I)
+# Whole targets only: a drive root, ~ / $HOME / %USERPROFILE%, or C:\Users\<name>.
+_HOME_OR_ROOT = re.compile(
+    r"(?:^|[\s\"'=(])(?:/|~|\$home|\$\{home\}|\$env:userprofile|\$env:homedrive|%userprofile%|%homedrive%|"
+    r"[a-z]:|/[a-z]|(?:[a-z]:|/[a-z])[\\/]users[\\/][^\\/\s\"']+)[\\/]?(?:\*)?(?=[\s\"');]|$)", re.I)
+
+
 def never(tool: str, params: dict) -> str:
     """Reason string if this is on the never list, else ''."""
     params = params if isinstance(params, dict) else {}
-    if tool == "Bash" and NEVER_SHELL.search(str(params.get("command", ""))):
-        return "wipes a disk, boot config, a drive root or the home folder"
+    if tool in ("Bash", "PowerShell"):
+        cmd = str(params.get("command", ""))
+        if NEVER_SHELL.search(cmd) or re.search(r"\bformat-volume\b|-e(?:nc(?:odedcommand)?|c)\s+[a-z0-9+/=]{16,}",
+                                                cmd, re.I):
+            return "wipes a disk, boot config, or runs a hidden (encoded) command"
+        for seg in re.split(r"&&|\|\||[;\n|&]", cmd):
+            # cmd's del /s /q: its switches look like Git Bash drive roots (/q), so drop them
+            target = re.sub(r"(?<=\s)/[a-z](?=\s|$)", " ", seg, flags=re.I) \
+                if re.search(r"\b(?:del|erase|rd|rmdir)\b", seg, re.I) else seg
+            if _DELETE.search(seg) and _RECURSE.search(seg) and _HOME_OR_ROOT.search(target):
+                return "deletes a drive root or the home folder"
+        if DANGEROUS_SHELL.search(cmd) and any(NEVER_PATH.search(w.strip("\"'"))
+                                               for w in re.split(r"[\s>]+", cmd) if w):
+            return "keys or secrets"
     if tool in EDIT_TOOLS and NEVER_PATH.search(str(params.get("file_path") or params.get("notebook_path") or "")):
         return "keys or secrets"
     return ""
@@ -177,6 +197,11 @@ def classify(tool: str, params: dict | None = None) -> dict:
             return out("confirm", "empty command")
         if DANGEROUS_SHELL.search(cmd):
             return out("confirm", "changes, deletes, installs or sends something")
+        # The splitter below only knows && || ; |. A newline, a lone &, $( ),
+        # backticks, find -exec or git --output smuggle a second command past
+        # it ("echo a<newline>python evil.py" used to come out "free").
+        if re.search(r"[\r\n`]|(?<!&)&(?!&)|\$\(|<\(|\s-exec\b|\s-execdir\b|--output\b|\s-ok\b", cmd):
+            return out("confirm", "runs more than one thing")
         pieces = [p for p in re.split(r"&&|\|\||;|\|", cmd) if p.strip()]
         if pieces and all(SAFE_SHELL.match(p) for p in pieces):
             return out("free", "only looks")

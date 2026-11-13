@@ -139,7 +139,9 @@ CODE = re.compile(
 HARD = re.compile(_words(
     r"plan", r"design", r"architect\w*", r"analy[sz]e", r"analysis", r"compare", r"comparison",
     r"pros and cons", r"trade-?offs?", r"step by step", r"explain (?:how|why) .{0,40}works?",
-    r"why (?:does|is|do|did|won'?t|isn'?t)", r"debug", r"diagnose", r"troubleshoot",
+    # A bare "why does that keep happening" is a short answer (Haiku); a why
+    # PLUS "what should I change" is a diagnosis.
+    r"why (?:does|is|do|did|won'?t|isn'?t) .{3,80} and (?:what|how) (?:should|do|can|could) i", r"debug", r"diagnose", r"troubleshoot",
     r"research", r"investigate", r"essay", r"report", r"summari[sz]e", r"proposal",
     r"strategy", r"optimi[sz]e", r"review", r"audit", r"walk me through", r"break down",
     r"in detail", r"detailed", r"thorough(?:ly)?", r"comprehensive"))
@@ -217,6 +219,13 @@ class Router:
         self.last_at = 0.0
 
     # ------------------------------------------------------------ settings
+    def local_words(self, said: str) -> bool:
+        """His school's names ("anything from <school>?") need the school tool, not
+        small talk. Kept in config.json school.words so they are never published."""
+        school = self.cfg.get("school") if isinstance(self.cfg.get("school"), dict) else {}
+        low = said.lower()
+        return any(str(w).lower() in low for w in (school.get("words") or []) if w)
+
     def enabled(self) -> bool:
         r = self.cfg.get("routing")
         return not (isinstance(r, dict) and r.get("enabled") is False)
@@ -248,7 +257,7 @@ class Router:
             return "normal", "rules"                     # "open notepad and type hello"
         if CODE.search(said):
             return "code", "rules"
-        needs_tools = bool(TOOLS.search(said))
+        needs_tools = bool(TOOLS.search(said)) or self.local_words(said)
         if CHAT.search(said) and not needs_tools:
             return "chat", "rules"
         if needs_tools and len(said.split()) <= 8 and not HARD.search(said):
@@ -263,8 +272,19 @@ class Router:
                 return "normal", "classifier+tools"
             if working and guess == "chat" and not CHAT.search(said):
                 return "normal", "classifier+follow-up"
-            if guess == "expert" and not EXPERT.search(said) and len(said.split()) < 25:
-                return "hard", "classifier (capped)"      # the 3B model over-calls expert
+            # The 3B model over-calls hard/expert/code ("what else do you know about
+            # me" -> Sonnet, "connect my Google" -> Opus). Each of those hops also
+            # opens a new Sonnet/Opus process and pays a fresh 17-35K cache write.
+            # Trust it only when his words carry a marker too.
+            short = len(said.split()) < 25
+            if guess == "expert" and not EXPERT.search(said):
+                if HARD.search(said) or not short:
+                    return "hard", "classifier (capped)"
+                return "normal", "classifier (capped)"
+            if guess == "hard" and short and not HARD.search(said):
+                return "normal", "classifier (capped)"
+            if guess == "code" and short and not CODEY.search(said):
+                return "normal", "classifier (capped)"
             return guess, "classifier"
         return heuristic(said), "heuristics"
 
