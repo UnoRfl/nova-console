@@ -158,6 +158,7 @@ class Telegram:
         self.thread: threading.Thread | None = None
         self.stop_flag = threading.Event()
         self.username = ""
+        self.real_call = None                            # set by the bridge: rings from her own number
 
     # ------------------------------------------------------------ state
     def _load(self) -> dict:
@@ -226,6 +227,9 @@ class Telegram:
     def from_owner(self, msg: dict, text: str) -> None:
         voice = msg.get("voice") or msg.get("audio")
         if text.lower() in ("/call", "call", "call me", "/start"):
+            if text.lower() != "/start" and self.real_call and self.real_call():
+                self.send("Ringing you now, Sir.", loud=False)
+                return
             url = self.call_url()
             if url:
                 self.send("Tap to talk to me live.", button=("Answer live", url))

@@ -46,6 +46,7 @@ import nova_schedule  # noqa: E402
 import nova_extras  # noqa: E402
 import nova_telegram  # noqa: E402
 import nova_skills  # noqa: E402
+import nova_phoneline  # noqa: E402
 
 try:                        # "play X on Spotify" with no model (nova_spotify.py)
     import nova_spotify
@@ -2199,8 +2200,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/phone":
             # Sir's own Tailscale login opens it without the token in the URL,
             # so the "Answer live" link Telegram carries holds no secret.
-            if not (self.authorized() or (self.remote() and owner_login(
-                    self.headers.get("Tailscale-User-Login", "")))):
+            who = self.headers.get("Tailscale-User-Login", "")
+            ok = self.authorized() or (self.remote() and owner_login(who))
+            if self.remote():
+                log(f"phone page {'served' if ok else 'REFUSED'} over Tailscale "
+                    f"({'Sir' if owner_login(who) else 'someone else'}, {self.headers.get('User-Agent', '')[:60]})")
+            if not ok:
                 self.send_text(b"Forbidden: missing or bad token.", "text/plain; charset=utf-8", 403)
                 return
             try:
@@ -2245,7 +2250,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/telegram":
-            self.send_json(self.server.telegram.status())
+            info = dict(self.server.telegram.status())
+            info["phoneline"] = self.server.phoneline.status()
+            self.send_json(info)
             return
 
         if route == "/api/health":
@@ -2530,7 +2537,7 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 self.send_json({"error": "bad_request", "detail": "No text."}, 400)
                 return
-            self.send_json(self.server.telegram.ring(text, live=bool(body.get("live", True))))
+            self.send_json(self.server.ring_sir(text, live=bool(body.get("live", True))))
             return
 
         if route == "/api/telegram/pair":
@@ -3722,7 +3729,7 @@ def main() -> int:
         where the Discord bot will pick it up."""
         tg_cfg = cfg.get("telegram") if isinstance(cfg.get("telegram"), dict) else {}
         if tg_cfg.get("ring_when_away", True) and getattr(httpd, "telegram", None) and httpd.telegram.owner:
-            threading.Thread(target=httpd.telegram.ring, args=(text,), daemon=True).start()
+            threading.Thread(target=httpd.ring_sir, args=(text,), daemon=True).start()
         if not nova_presence.cfg().get("discord", True):
             return
         box = STATE / "outbox"
@@ -3755,6 +3762,29 @@ def main() -> int:
         ask=telegram_ask, transcribe=nova_stt.transcribe,
         synth=synth_long if nova_voice else (lambda t: (_ for _ in ()).throw(RuntimeError("no voice"))),
         log=log, call_url=call_page_url, announce=announce, state_file=STATE / "telegram.json")
+
+    # Her own Telegram account on the headless PC (nova_caller.py): real calls.
+    pl_cfg = cfg.get("phoneline") if isinstance(cfg.get("phoneline"), dict) else {}
+
+    def call_turn(heard: str, reply: str) -> None:
+        activity.push("text", f"(call) {reply[:300]}")
+        backend.record(f"(on the phone) {heard}", reply, "away")
+
+    httpd.phoneline = nova_phoneline.PhoneLine(
+        pl_cfg, ask=telegram_ask, transcribe=nova_stt.transcribe,
+        synth=synth_long if nova_voice else (lambda t: (_ for _ in ()).throw(RuntimeError("no voice"))),
+        log=log, on_missed=lambda t: httpd.telegram.ring(t), on_turn=call_turn)
+
+    def ring_sir(text: str, live: bool = True) -> dict:
+        """Call Sir: a real Telegram call from her own number when that line is up,
+        otherwise (or if he does not pick up) the bot's message + voice note."""
+        if live and pl_cfg.get("real_calls", True) and httpd.phoneline.call(text):
+            log(f"phoneline: ringing Sir: {text[:80]}")
+            return {"ok": True, "real_call": True}
+        return httpd.telegram.ring(text, live=live)
+
+    httpd.ring_sir = ring_sir
+    httpd.telegram.real_call = lambda: httpd.phoneline.call("Yes, Sir?")
     httpd.daemon_threads = True
 
     url = f"http://127.0.0.1:{args.port}/?token={token}"
@@ -3771,6 +3801,8 @@ def main() -> int:
         httpd.lights.start()
         # Telegram polls only from the live bridge: a test bridge must never
         # take Sir's messages off the real bot.
+        if httpd.phoneline.start():
+            log(f"phoneline: connecting to Nova's line at {pl_cfg.get('host')}:{pl_cfg.get('port', 8790)}")
         if httpd.telegram.start():
             log(f"telegram: polling as @{httpd.telegram.username or '?'}"
                 f" ({'paired' if httpd.telegram.owner else 'NOT paired'})")
