@@ -48,7 +48,9 @@
            background:radial-gradient(130% 80% at 50% 26%, #120a24 0%, var(--void) 68%); }
   /* Soft by their own gradients -- no filter:blur. A blurred, moving, screen-sized
      layer is what made the page stutter and freeze on iPhone. */
-  .field i { position:absolute; border-radius:50%; opacity:.5; will-change:transform; }
+  .field i { position:absolute; border-radius:50%; opacity:.5; }
+  /* The lights stay still on the phone: the star is the only thing that moves. */
+  .field .a1, .field .a2 { animation:none !important; }
   .field .a1 { width:95vmax; height:95vmax; left:-45vmax; top:-55vmax;
                background:radial-gradient(circle, color-mix(in srgb, var(--accent) 46%, transparent), transparent 62%);
                animation:drift1 38s ease-in-out infinite alternate; }
@@ -62,8 +64,12 @@
     -webkit-mask-image:radial-gradient(80% 50% at 50% 30%, #000 10%, transparent 78%);
             mask-image:radial-gradient(80% 50% at 50% 30%, #000 10%, transparent 78%); }
 
-  .glass { background:var(--sheen), var(--glass); -webkit-backdrop-filter:var(--blur); backdrop-filter:var(--blur);
-           border:1px solid var(--line); box-shadow:var(--shadow); }
+  /* Glass WITHOUT live blur. On iPhone every backdrop-filter re-blurs whatever
+     moves behind it on every frame (the drifting light, the star), and that is
+     what kept the page stuttering. The frosted look comes from the sheen and a
+     deep translucent tint instead. */
+  .glass { background:var(--sheen), rgba(22,13,40,.86); border:1px solid var(--line); box-shadow:var(--shadow); }
+  .chip, .bar, .sheet, .iconbtn, .cbtn span { -webkit-backdrop-filter:none !important; backdrop-filter:none !important; }
 
   /* ---------------------------------------------------------------- top */
   header { position:relative; z-index:3; display:flex; align-items:center; gap:8px; padding:14px 16px 6px; flex:none; }
@@ -148,7 +154,7 @@
   .access b { color:#ff9be6; font-weight:500; }
 
   #screen { position:fixed; inset:0; z-index:10; display:none; flex-direction:column; background:rgba(6,3,13,.86);
-            -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px); padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+            padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); background:rgba(6,3,13,.96); }
   #screen.on { display:flex; animation:rise .3s var(--ease) both; }
   #screen .top { display:flex; align-items:center; gap:8px; padding:14px 16px; }
   #screen .top span { flex:1; font:400 11px var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--ink-dim); }
@@ -296,9 +302,9 @@
     const g = cv.getContext("2d");
     const k = { cv, g, side:200, rgb:[192,140,255], spin:1, surge:0, burst:0, last:0,
                 phase:RINGS.map((_, i) => i * 1.7), ring:RINGS.map(() => 1), angle:RINGS.map(() => 0),
-                motes:Array.from({ length:26 }, () => ({ a:Math.random()*6.28, life:Math.random(), rate:6e-5 + Math.random()*1.2e-4, size:.6 + Math.random()*1.4 })) };
+                motes:Array.from({ length:14 }, () => ({ a:Math.random()*6.28, life:Math.random(), rate:6e-5 + Math.random()*1.2e-4, size:.6 + Math.random()*1.4 })) };
     k.size = () => {
-      const dpr = Math.min(devicePixelRatio || 1, 2), box = cv.getBoundingClientRect();
+      const dpr = Math.min(devicePixelRatio || 1, 1.5), box = cv.getBoundingClientRect();   // sharp enough for a glow, ~45% fewer pixels than 2x
       k.side = Math.max(40, Math.min(box.width, box.height) || 200);
       cv.width = Math.round(k.side * dpr); cv.height = Math.round(k.side * dpr);
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -433,8 +439,16 @@
   }
   // 30 fps is plenty for a slow star on a phone, and halves the work.
   let lastDraw = 0;
+  // ?fps shows a frame counter in the readout, to measure on the real phone.
+  const showFps = /[?&]fps\b/.test(location.search);
+  let fpsN = 0, fpsAt = 0, worst = 0;
   function frame(t) {
     requestAnimationFrame(frame);
+    if (showFps) {
+      worst = Math.max(worst, t - (frame.prev || t)); frame.prev = t; fpsN++;
+      if (t - fpsAt > 1000) { $("readout").textContent = `${Math.round(fpsN * 1000 / (t - fpsAt))} fps · worst ${Math.round(worst)} ms`;
+                              fpsN = 0; fpsAt = t; worst = 0; }
+    }
     if (t - lastDraw < 31) return;
     lastDraw = t;
     if (S.mode === "speaking") {
