@@ -61,6 +61,7 @@ TIERS = {
     "keep_watch": "announce", "list_watches": "free", "cancel_watch": "announce",
     "open_loops": "free", "close_loop": "announce",
     "look_at_this": "free", "presence": "free",
+    "class_schedule": "free", "stock_quote": "free",
 }
 
 MC_DIR = r"C:\Users\You\Downloads\mcserver"      # on the headless PC
@@ -593,7 +594,72 @@ def presence() -> str:
     return json.dumps(r)
 
 
-ALL = [job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
+def class_schedule(day: str = "") -> str:
+    """Sir's class timetable. day: "" = the whole week, "today", "tomorrow", "next",
+    or a weekday name. Reminders 10 minutes before each class are automatic; to change
+    the timetable, edit ~/.nova/schedule.json (24-hour times, day = mon..sun)."""
+    import time
+    import nova_schedule as ns
+    d = day.strip().lower()
+    if d == "next":
+        nxt = ns.next_class()
+        if not nxt:
+            return "No upcoming class."
+        c, start = nxt
+        mins = int((start - time.time()) // 60)
+        return f"{ns.describe(c)} on {time.strftime('%A', time.localtime(start))} (in {mins // 60}h {mins % 60}m)."
+    if d in ("today", "tomorrow") or d[:3] in ns.DAYS:
+        if d == "today":
+            idx = time.localtime().tm_wday
+        elif d == "tomorrow":
+            idx = time.localtime(time.time() + 86400).tm_wday
+        else:
+            idx = ns.DAYS.index(d[:3])
+        cs = ns.classes_on(ns.load(), idx)
+        return f"{ns.DAY_NAMES[idx]}: " + ("; ".join(ns.describe(c) for c in cs) if cs else "no classes.")
+    return ns.week_text()
+
+
+def _get_json(url: str, timeout: float = 8) -> dict:
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def stock_quote(query: str) -> str:
+    """Live-ish price for a stock, ETF, index or crypto. query is a ticker (NVDA, BTC-USD,
+    ^GSPC) or a company name ("nvidia"). Free Yahoo Finance data, may lag ~15 minutes.
+    Use this instead of a web search for any price question."""
+    import urllib.parse
+    q = query.strip()
+    symbol, name = q.upper(), ""
+    try:
+        found = _get_json("https://query1.finance.yahoo.com/v1/finance/search?quotesCount=3&newsCount=0&q="
+                          + urllib.parse.quote(q))
+        quotes = [x for x in found.get("quotes", []) if x.get("symbol")]
+        if quotes:
+            symbol = quotes[0]["symbol"]
+            name = quotes[0].get("shortname") or quotes[0].get("longname") or ""
+    except Exception:                                 # noqa: BLE001 -- fall through to the raw ticker
+        pass
+    try:
+        chart = _get_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
+                          "?range=1d&interval=1d")
+        meta = chart["chart"]["result"][0]["meta"]
+    except Exception as exc:                          # noqa: BLE001
+        return f"No quote for {q!r} ({type(exc).__name__}). Try the exact ticker."
+    price, prev = meta.get("regularMarketPrice"), meta.get("chartPreviousClose") or meta.get("previousClose")
+    import time
+    when = time.strftime("%a %H:%M", time.localtime(meta.get("regularMarketTime") or time.time()))
+    line = f"{name or meta.get('longName') or symbol} ({symbol}): {price} {meta.get('currency', '')}"
+    if price and prev:
+        ch = price - prev
+        line += f", {'up' if ch >= 0 else 'down'} {abs(ch):.2f} ({ch / prev * 100:+.2f}%) on the day"
+    return line + f", as of {when} local time, exchange {meta.get('exchangeName', '?')}."
+
+
+ALL = [class_schedule, stock_quote, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
        remind, list_reminders, cancel_reminder, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
        remember, recall, forget, day_log, say,

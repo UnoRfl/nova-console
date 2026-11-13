@@ -543,6 +543,15 @@ class Events:
             self.announce(f"Sir, the main drive is down to about {int(pct)} percent free, "
                           f"roughly {int(usage.free / 2**30)} gigabytes.")
 
+    def check_classes(self, now: float | None = None) -> None:
+        """Timetable nudges (schedule.json). Urgent: a class does not wait for
+        a game to end, and if he is away it also goes to his Discord DMs."""
+        import nova_schedule
+        for kind, text in nova_schedule.due(now, here=not self.presence.away):
+            if self.activity:
+                self.activity.push("system", "Class", text[:120])
+            self.announce(text, urgent=True)
+
     def check_briefing(self) -> None:
         when = cfg()["briefing_time"]
         today = time.strftime("%Y-%m-%d")
@@ -551,6 +560,7 @@ class Events:
         if time.strftime("%H:%M") >= when and not self.should_hold():
             self.briefed = today
             self._ask("Give Sir his morning briefing, spoken, four sentences at most: the date, "
+                      "his classes today (class_schedule tool), "
                       "whether the Minecraft server is up, any background jobs that finished, and "
                       "anything in your memory he asked to be reminded of today. Use your tools.")
 
@@ -564,6 +574,7 @@ class Events:
                     else:
                         self.announce("Sir, a reminder: " + item["text"], urgent=True)
                 self.check_presence()
+                self.check_classes()
                 self.flush_held()
                 self.check_orders()
                 self.narrate_jobs()

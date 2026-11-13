@@ -182,6 +182,36 @@ def clean_env() -> dict:
 
 OLLAMA = "http://127.0.0.1:11434"
 _local_cache = {"at": 0.0, "model": None}
+_serve_tried = {"at": 0.0}
+
+
+def ensure_ollama() -> bool:
+    """Start `ollama serve` if Ollama is installed but not answering.
+
+    Without it the router's free "chat" tier silently falls back to Claude,
+    so small talk spends tokens. The tray app is not always running after a
+    reboot, so Nova starts the server herself (hidden, detached), at most
+    once every five minutes. Returns True if a start was attempted."""
+    import urllib.request
+    if time.time() - _serve_tried["at"] < 300:
+        return False
+    try:
+        urllib.request.urlopen(OLLAMA + "/api/version", timeout=1.5).close()
+        return False                                  # already up
+    except Exception:                                 # noqa: BLE001
+        pass
+    exe = which("ollama") or str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe")
+    if not Path(exe).is_file():
+        return False
+    _serve_tried["at"] = time.time()
+    try:
+        subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True,
+                         creationflags=0x08000000 | 0x00000008 | 0x00000200)  # no window, detached, new group
+    except OSError:
+        return False
+    _local_cache["at"] = 0.0                          # look again on the next request
+    return True
 
 
 def local_model() -> str | None:
@@ -203,6 +233,8 @@ def local_model() -> str | None:
     except Exception:                                 # noqa: BLE001
         model = None
     _local_cache.update(at=time.time(), model=model)
+    if model is None and not os.environ.get("NOVA_TEST"):
+        ensure_ollama()                               # free brain down: bring it up for next time
     return model
 
 

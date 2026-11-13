@@ -23,6 +23,9 @@ import threading
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nova_words  # noqa: E402
+
 # "small.en" is the accuracy/speed sweet spot on CPU for English dictation.
 # Override in ~/.nova/config.json with {"whisper_model": "base.en"}.
 DEFAULT_MODEL = "small.en"
@@ -114,8 +117,9 @@ def transcribe(data: bytes) -> dict:
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 400},
             condition_on_previous_text=False,
+            initial_prompt=nova_words.prompt(),       # Sir's vocabulary (config.json)
         )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        text = nova_words.fix(" ".join(seg.text.strip() for seg in segments).strip())
     except Exception as exc:                          # noqa: BLE001
         return {"error": "transcribe_failed", "detail": f"{type(exc).__name__}: {exc}"}
 

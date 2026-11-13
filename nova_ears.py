@@ -41,6 +41,8 @@ import sys
 import threading
 import time
 import urllib.request
+
+import nova_words
 from pathlib import Path
 
 import numpy as np
@@ -252,8 +254,9 @@ class Whisper:
             samples, language="en", beam_size=1,
             condition_on_previous_text=False,
             # Bias the spelling of her name; without it "Nova" comes out as
-            # "Noah" or "no va" often enough to matter.
-            initial_prompt="Hey Nova. Nova, what time is it?",
+            # "Noah" or "no va" often enough to matter. nova_words adds Sir's
+            # own vocabulary (config "vocabulary"), so NVIDIA is not "Envije".
+            initial_prompt=nova_words.prompt(),
             no_speech_threshold=0.6,
         )
         parts = []
@@ -261,7 +264,7 @@ class Whisper:
             if getattr(s, "no_speech_prob", 0.0) > 0.8:
                 continue
             parts.append(s.text.strip())
-        return clean(" ".join(parts)), time.time() - began
+        return clean(nova_words.fix(" ".join(parts))), time.time() - began
 
 
 class Speaker:

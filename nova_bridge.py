@@ -42,6 +42,7 @@ import nova_events  # noqa: E402
 import nova_presence  # noqa: E402
 import nova_router  # noqa: E402
 import nova_initiative  # noqa: E402
+import nova_schedule  # noqa: E402
 
 try:                        # Nova's own voice. Optional: without it the HUD
     import nova_voice       # falls back to the browser's speech synthesis.
@@ -74,6 +75,7 @@ if os.environ.get("NOVA_TEST"):
     nova_initiative.ORDERS_FILE = STATE / "orders.json"
     nova_initiative.WATCH_STATE = STATE / "watch-state.json"
     nova_presence.BASELINE_FILE = STATE / "lights-baseline.json"
+    nova_schedule.SCHEDULE_FILE = STATE / "schedule.json"   # a test bridge never nags about real classes
 
 # How long a wake signal stays claimable. Long enough for a cold browser
 # launch, short enough that a stale one never arms the mic out of nowhere.
@@ -763,6 +765,49 @@ PANEL_REPLY = {
     "open": "Back up for you, Sir.",
     "move": "Moved it over, Sir.",
 }
+
+
+# "Thanks" / "it's fine" / "okay, sounds good": a closing remark, not a
+# request. These used to go to Claude (about 1 s and real tokens each) just
+# to hear "Very good, Sir." Only an utterance made of NOTHING but these words
+# counts; "okay, now open Blender" still goes to the model. Agreement words
+# that start work ("yes", "do it", "go ahead") are deliberately absent.
+ACK_THANKS = re.compile(r"\b(?:thanks?|thank you|thank u|cheers|appreciate it)\b")
+ACK_WORDS = re.compile(
+    r"(?:thanks|thank you|thank u|thanks a lot|thank you so much|cheers|appreciate it|"
+    r"ok|okay|okey|k|alright|all right|right|cool|nice|great|perfect|good|very good|"
+    r"sounds good|that's good|that's fine|it's fine|that's okay|it's okay|fine|"
+    r"got it|gotcha|noted|understood|no worries|no problem|never mind|nevermind|forget it|"
+    r"that's all|that's it|that will be all|that'll be all|nothing|nothing else|"
+    r"oh|uh|um|hmm|yeah|yep|ah|sir|nova|hey|for now|"
+    r"good job|well done|nice one|love it|awesome)(?= |$)"   # whole words only, so "ok" never eats "okay"
+)
+
+
+def ack_reply(prompt: str) -> str | None:
+    """A short spoken reply if this is only an acknowledgement, else None."""
+    said = re.sub(r"[^a-z' ]+", " ", (prompt or "").lower().replace("’", "'"))
+    said = " ".join(said.split())
+    if not said or len(said) > 60:
+        return None
+    rest = said
+    while rest:
+        m = ACK_WORDS.match(rest)
+        if not m or (m.end() < len(rest) and rest[m.end()] != " "):
+            return None
+        rest = rest[m.end():].lstrip()
+    if not re.search(r"\b(?:thanks?|thank you|thank u|cheers|appreciate|ok|okay|okey|k|alright|all right|"
+                     r"cool|nice|great|perfect|good|fine|got it|gotcha|noted|understood|worries|problem|"
+                     r"never ?mind|forget it|that's all|that's it|that will be all|that'll be all|nothing|"
+                     r"well done|nice one|love it|awesome)\b", said):
+        return None                                   # bare filler ("yeah", "right"): let the usual path decide
+    if ACK_THANKS.search(said):
+        return "You're welcome, Sir."
+    if re.search(r"\b(?:never ?mind|forget it|nothing|that's all|that's it|that will be all|that'll be all)\b", said):
+        return "Very good, Sir."
+    if re.search(r"\b(?:good job|well done|nice one|love it|awesome|perfect|great)\b", said):
+        return "Glad to hear it, Sir."
+    return "Very good, Sir."
 
 
 def orb_command(prompt: str) -> str | None:
@@ -1525,6 +1570,17 @@ class Backend:
             if speak and nova_voice and not nova_voice.shared().error:
                 self.speech = nova_voice.shared().open_stream()
                 self.streamer = nova_harness.SentenceStreamer(self.speech.feed)
+                # Long thinking before the first word or tool felt like being
+                # ignored. Silent for 2.5 s -> say "On it, Sir" once, the same
+                # line a tool call earns.
+                def nudge(speech=self.speech, streamer=self.streamer) -> None:
+                    if (self.speech is speech and not self.done.is_set() and not self.acked
+                            and streamer.count == 0 and not self.saw_partials):
+                        self.acked = True
+                        speech.feed(nova_voice.ACKS["ack"][int(time.time()) % 4])
+                timer = threading.Timer(2.5, nudge)
+                timer.daemon = True
+                timer.start()
 
             message = {
                 "type": "user",
@@ -2368,6 +2424,16 @@ class Handler(BaseHTTPRequestHandler):
                                 "memories": len(load_memories(limit=10_000))})
                 return
 
+            ack = ack_reply(prompt)
+            if ack:
+                log(f"ack (no model): {ack}")
+                self.server.activity.push("system", "Ack", ack)
+                spoken = self.server.speak_now(ack) if body.get("speak") else False
+                self.send_json({"text": ack, "ms": 0, "turns": 0, "denials": 0,
+                                "remembered": [], "ack": True, "spoken": spoken,
+                                "memories": len(load_memories(limit=10_000))})
+                return
+
             # An outright "remember X" is filed here rather than left to the
             # model to mark up, so an explicit instruction is never dropped.
             noted = remember_from_prompt(prompt)
@@ -2863,6 +2929,8 @@ def main() -> int:
 
     httpd.answer_if_unclaimed = answer_if_unclaimed
     httpd.jobs = nova_harness.Jobs(on_done=job_done, default_dir=cfg["workdir"])
+    if not os.environ.get("NOVA_TEST") and nova_harness.ensure_ollama():
+        log("started ollama serve (the free local brain was down)")
     httpd.events = nova_events.Events(announce=announce, ask=ask_and_speak, activity=activity,
                                       check=silent_check, jobs=httpd.jobs, notify=notify_away)
     httpd.daemon_threads = True
