@@ -193,14 +193,30 @@ def keys(combo: str, window: str = "") -> str:
 def _whatsapp():
     auto = _auto()
     win = auto.WindowControl(searchDepth=1, Name="WhatsApp", ClassName="WinUIDesktopWin32WindowClass")
+    hide_after = False
     if not win.Exists(0.5):
         subprocess.Popen(creationflags=0x08000000, args=["explorer.exe", WHATSAPP_APP])
         if not win.Exists(15):
             raise RuntimeError("WhatsApp did not open. Is the WhatsApp app installed and signed in?")
+        hide_after = True                             # it was only in the tray: put it back after
+    elif win.IsMinimize():
+        # A minimised WebView2 window shows no chat list to UI Automation.
+        # Restore it without taking focus; minimise it again when done.
+        auto.ShowWindow(win.NativeWindowHandle, 4)   # SW_SHOWNOACTIVATE
+        hide_after = True
     grid = win.DataGridControl(searchDepth=20, Name="Chat list")
     if not grid.Exists(10):
+        _put_back(win, hide_after)
         raise RuntimeError("WhatsApp is open but shows no chat list (signed out, or still loading).")
-    return win, grid
+    return win, grid, hide_after
+
+
+def _put_back(win, hide_after: bool) -> None:
+    if hide_after:
+        try:
+            _auto().ShowWindow(win.NativeWindowHandle, 7)   # SW_SHOWMINNOACTIVE
+        except Exception:                             # noqa: BLE001
+            pass
 
 
 def _rows(grid) -> list[str]:
@@ -211,8 +227,9 @@ def whatsapp_chats(limit: int = 15) -> str:
     """Most recent WhatsApp chats with time and last message. Read-only."""
     auto = _auto()
     with auto.UIAutomationInitializerInThread():
-        _win, grid = _whatsapp()
+        win, grid, hide_after = _whatsapp()
         rows = [r if len(r) <= 220 else r[:217] + "..." for r in _rows(grid)[: int(limit)]]
+        _put_back(win, hide_after)
         taint("whatsapp")
         return "\n".join(rows) or "No chats visible."
 
@@ -236,8 +253,8 @@ def whatsapp_read(chat: str, max_chars: int = 3000) -> str:
     WhatsApp window comes to the front for a moment."""
     auto = _auto()
     with auto.UIAutomationInitializerInThread():
-        win, grid = _whatsapp()
         before = auto.GetForegroundControl().GetTopLevelControl()
+        win, grid, hide_after = _whatsapp()
         want = chat.lower().strip()
         win.SetActive()
         time.sleep(0.3)
@@ -263,6 +280,7 @@ def whatsapp_read(chat: str, max_chars: int = 3000) -> str:
         parts = _texts_outside(doc, lambda c: c.Name in nav or c.ControlTypeName in ("DataGridControl", "TabControl"))
         text = re.sub(r"[ \t]+", " ", "".join(p if p.startswith("\n") else p + " " for p in parts))
         text = re.sub(r"\n\s*", "\n", text).strip()
+        _put_back(win, hide_after)
         try:
             if before and before.Name != win.Name:
                 before.SetActive()                    # give him his window back

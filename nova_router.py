@@ -106,7 +106,11 @@ TOOLS = re.compile(_words(
     # the local chat model cannot act and must never get these.
     r"remove", r"hide", r"dismiss", r"minimi[sz]e", r"maximi[sz]e", r"move", r"delete",
     r"get rid of", r"take (?:it|that|this) (?:down|away|off)", r"put (?:it|that) away",
-    r"tab", r"window", r"panel", r"monitor", r"display", r"do it", r"did you"))
+    r"tab", r"window", r"panel", r"monitor", r"display", r"do it", r"did you",
+    # Putting something on his screen, or asking her to just do it.
+    r"in front", r"to the front", r"bring (?:it|that|this|them)? ?(?:up|forward|back)", r"pull (?:it|that)? ?up",
+    r"put (?:it|that|this) (?:up|on|in)", r"can'?t see", r"cannot see", r"don'?t see", r"show",
+    r"lyrics", r"automatically", r"for me", r"do (?:that|this)", r"handle it"))
 
 # 3b'. Driving the PC: opening apps, typing, pressing keys. One or two tool
 # calls -- Haiku's job, however many words it takes to say.
@@ -250,9 +254,14 @@ class Router:
             return "normal", "rules"                     # "open spotify", "volume down"
 
         guess = classify(said, local_model) if local_model else None
+        # Shortly after real work, a reply that is not plain small talk is
+        # about that work ("can't you do that for me?"): never the toolless model.
+        working = time.time() - getattr(self, "last_work_at", 0.0) < STICKY_SECONDS
         if guess:
             if needs_tools and guess == "chat":
                 return "normal", "classifier+tools"
+            if working and guess == "chat" and not CHAT.search(said):
+                return "normal", "classifier+follow-up"
             if guess == "expert" and not EXPERT.search(said) and len(said.split()) < 25:
                 return "hard", "classifier (capped)"      # the 3B model over-calls expert
             return guess, "classifier"
@@ -261,6 +270,8 @@ class Router:
     def remember(self, tier: str) -> None:
         if tier in TIERS:
             self.last_tier, self.last_at = tier, time.time()
+            if RANK.get(tier, 0) >= 1:
+                self.last_work_at = self.last_at
 
     # ------------------------------------------------------------- engines
     def plan(self, tier: str, claude_ok: bool, codex_ok: bool, local_ok: bool) -> list[tuple[str, str]]:
