@@ -64,6 +64,12 @@ def active_on(data: dict, lt: time.struct_time) -> bool:
     date = time.strftime("%Y-%m-%d", lt)
     if date in data.get("skip_dates", []):
         return False
+    try:                                          # holidays and posted suspensions
+        import nova_school
+        if nova_school.no_school(date):
+            return False
+    except Exception:                             # noqa: BLE001 -- never let this stop a reminder
+        pass
     until = data.get("until") or ""
     return not (until and date > until)
 

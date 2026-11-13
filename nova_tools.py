@@ -61,7 +61,7 @@ TIERS = {
     "keep_watch": "announce", "list_watches": "free", "cancel_watch": "announce",
     "open_loops": "free", "close_loop": "announce",
     "look_at_this": "free", "presence": "free",
-    "class_schedule": "free", "stock_quote": "free",
+    "class_schedule": "free", "school_days": "free", "stock_quote": "free",
     # Hands. Looking and reading are free. Driving her own sandboxed Chrome is
     # "announce". Driving Sir's real desktop is "confirm": allowed while
     # ask_first is off, but refused by the gate once she has read untrusted
@@ -628,7 +628,46 @@ def class_schedule(day: str = "") -> str:
         else:
             idx = ns.DAYS.index(d[:3])
         cs = ns.classes_on(ns.load(), idx)
+        if d in ("today", "tomorrow"):
+            import nova_school
+            date = time.strftime("%Y-%m-%d", time.localtime(time.time() + (86400 if d == "tomorrow" else 0)))
+            off = nova_school.no_school(date)
+            if off and cs:
+                return f"{ns.DAY_NAMES[idx]}: NO SCHOOL ({off}). Normally: " + "; ".join(ns.describe(c) for c in cs)
         return f"{ns.DAY_NAMES[idx]}: " + ("; ".join(ns.describe(c) for c in cs) if cs else "no classes.")
+
+
+def school_days(days_ahead: int = 30, check_now: bool = False) -> str:
+    """No-school days: Philippine public holidays and class suspensions, plus the latest
+    school notices from the his school and his city Facebook pages and the
+    past day's Google news on "walang pasok". Use for "is there school today/tomorrow",
+    "any class suspension", "next holiday", "anything from his school". check_now=true reads
+    the pages right away (slower) instead of using what the background watcher saw."""
+    import time
+    import nova_school
+    out = []
+    if check_now and _events_scan():
+        out.append("(pages just checked)")
+    today = time.strftime("%Y-%m-%d")
+    tomorrow = time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400))
+    out.append("Today: " + (("NO SCHOOL -- " + nova_school.no_school(today)) if nova_school.no_school(today)
+                            else "no holiday or suspension known."))
+    out.append("Tomorrow: " + (("NO SCHOOL -- " + nova_school.no_school(tomorrow)) if nova_school.no_school(tomorrow)
+                               else "no holiday or suspension known."))
+    up = nova_school.upcoming(max(1, min(int(days_ahead), 400)))
+    out.append(f"Next {days_ahead} days: " + ("; ".join(up) if up else "none."))
+    notes = nova_school.recent_notices()
+    if notes:
+        out.append(UNTRUSTED.format(src="Facebook / Google") + "Recent notices:\n" + "\n".join(notes))
+    return "\n".join(out)
+
+
+def _events_scan() -> bool:
+    try:
+        r = bridge("/api/school/scan", {}, timeout=300)
+        return not r.get("error")
+    except Exception:                                 # noqa: BLE001
+        return False
     return ns.week_text()
 
 
@@ -881,7 +920,7 @@ def open_settings(page: str = "") -> str:
     return f"Opened Settings ({uri}). Use desktop_look window=\"Settings\" next."
 
 
-ALL = [class_schedule, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
+ALL = [class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read,
        whatsapp_chats, whatsapp_read, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,

@@ -2205,6 +2205,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(ensure_hands())
             return
 
+        if route == "/api/school/scan":
+            ev = getattr(self.server, "events", None)
+            if not ev:
+                self.send_json({"error": "events not running"})
+                return
+            try:
+                self.send_json(ev.scan_school(force=True))
+            except Exception as exc:                  # noqa: BLE001
+                self.send_json({"error": f"{type(exc).__name__}: {exc}"[:300]})
+            return
+
         if route == "/api/reminders":
             when = nova_events.parse_when(str(body.get("when") or ""))
             if not when:

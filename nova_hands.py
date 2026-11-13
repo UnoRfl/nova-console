@@ -264,6 +264,31 @@ class Hands:
             out["note"] = "On Sir's screen, in front." if self.do_show(True).get("front") else "Shown on screen."
         return out
 
+    def do_scan(self, url: str, scrolls: int = 2) -> dict:
+        """Background read for the school-notice watcher: its own tab (never the
+        one he is looking at), no clicks, no taint (the text goes to a toolless
+        judge, not to her), closed again afterwards."""
+        page = self.browser().new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            self._settle(page)
+            # Facebook cuts long posts at "See more"; unfold them where it lets us.
+            try:
+                page.evaluate("""() => { for (const el of document.querySelectorAll('div[role=button]'))
+                                   if ((el.innerText || '').trim() === 'See more') el.click(); }""")
+            except Exception:                         # noqa: BLE001
+                pass
+            for _ in range(max(0, int(scrolls))):
+                page.mouse.wheel(0, 2500)
+                time.sleep(1.2)
+            text = page.inner_text("body")
+            return {"url": page.url, "text": re.sub(r"\n\s*\n+", "\n", text).strip()[:40000]}
+        finally:
+            try:
+                page.close()
+            except Exception:                         # noqa: BLE001
+                pass
+
     def do_search(self, query: str, show: bool = False) -> dict:
         return self.do_open("https://www.google.com/search?hl=en&q=" + urllib.parse.quote_plus(query), show)
 

@@ -110,7 +110,8 @@ TOOLS = re.compile(_words(
     # Putting something on his screen, or asking her to just do it.
     r"in front", r"to the front", r"bring (?:it|that|this|them)? ?(?:up|forward|back)", r"pull (?:it|that)? ?up",
     r"put (?:it|that|this) (?:up|on|in)", r"can'?t see", r"cannot see", r"don'?t see", r"show (?:it|that|this|the)",
-    r"lyrics", r"automatically", r"for me", r"do (?:that|this)", r"handle it"))
+    r"lyrics", r"automatically", r"holidays?", r"suspen\w*", r"walang pasok", r"pasok",
+    r"no school", r"school today", r"school tomorrow", r"classes? (?:today|tomorrow)", r"for me", r"do (?:that|this)", r"handle it"))
 
 # 3b'. Driving the PC: opening apps, typing, pressing keys. One or two tool
 # calls -- Haiku's job, however many words it takes to say.

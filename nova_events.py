@@ -30,6 +30,8 @@ import threading
 import time
 from pathlib import Path
 
+SCHOOL_SCAN = threading.Lock()                     # one school-notice scan at a time
+
 ROOT = Path.home() / ".nova"
 REMINDERS_FILE = ROOT / "reminders.json"
 ROUTINES_DIR = ROOT / "routines"
@@ -283,6 +285,7 @@ class Events:
         self.gpu_warned = 0.0
         self.narrated: dict[str, tuple[float, int]] = {}   # job id -> (when, steps) last spoken
         self.checking = False              # one standing-order check at a time
+        self.school_busy = False           # one school-notice scan at a time
 
     # -- speaking, with manners
     def should_hold(self) -> str:
@@ -552,6 +555,77 @@ class Events:
                 self.activity.push("system", "Class", text[:120])
             self.announce(text, urgent=True)
 
+    def check_school(self, now: float | None = None) -> None:
+        """No-school days: holidays and suspensions (nova_school). Heads-ups
+        go through announce(); the page reading runs in its own thread."""
+        import nova_school
+        c = nova_school.cfg()
+        if not c.get("enabled", True):
+            return
+        for text, urgent in nova_school.heads_up(now):
+            if self.activity:
+                self.activity.push("system", "School", text[:120])
+            self.announce(text, urgent=urgent)
+        hm = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
+        if not ("04:00" <= hm < "23:00") or self.school_busy or not self._check:
+            return
+        self.school_busy = True
+
+        def work():
+            try:
+                self.scan_school()
+            except Exception as exc:                  # noqa: BLE001
+                if self.activity:
+                    self.activity.push("system", "School error", f"{type(exc).__name__}: {exc}"[:160])
+            finally:
+                self.school_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def scan_school(self, force: bool = False) -> dict:
+        # One scan at a time: a background scan and an asked-for one once
+        # judged the same post together and announced it twice.
+        if not SCHOOL_SCAN.acquire(timeout=300 if force else 0):
+            return {"new": 0, "tell": [], "no_school": {}, "busy": True}
+        try:
+            return self._scan_school(force)
+        finally:
+            SCHOOL_SCAN.release()
+
+    def _scan_school(self, force: bool = False) -> dict:
+        import nova_school
+        import nova_tools
+
+        def read(url: str) -> str | None:
+            r = nova_tools._hands("scan", timeout=120, url=url)
+            return None if r.get("error") else r.get("text")
+
+        new = nova_school.gather(read, force=force)
+        if not new:
+            return {"new": 0, "tell": [], "no_school": {}}
+        reply = self._check(nova_school.judge_prompt(new)) if self._check else None
+        if reply is None:                             # no engine right now: look again next time
+            s = nova_school.load_state()
+            gone = {nova_school.fingerprint(it) for it in new}
+            s["seen"] = [f for f in s["seen"] if f not in gone]
+            nova_school.save_state(s)
+            return {"new": len(new), "tell": [], "no_school": {}, "deferred": True}
+        tell, off = nova_school.parse_judgement(reply)
+        known = nova_school.load_state()["no_school"]
+        if off and tell and all(d in known for d in off):
+            tell = []                                 # the same suspension, seen in another post
+        nova_school.record(new, tell, off)
+        today = time.strftime("%Y-%m-%d")
+        tomorrow = time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400))
+        soon = [d for d in off if d in (today, tomorrow)]
+        for d in soon:                                # the TELL covers it: no second heads-up
+            nova_school.mark_said(("today|" if d == today else "tomorrow|") + d)
+        for line in tell:
+            if self.activity:
+                self.activity.push("system", "School notice", line[:120])
+            self.announce(line if line.lower().startswith("sir") else "Sir, " + line, urgent=bool(soon))
+        return {"new": len(new), "tell": tell, "no_school": off}
+
     def check_briefing(self) -> None:
         when = cfg()["briefing_time"]
         today = time.strftime("%Y-%m-%d")
@@ -560,7 +634,8 @@ class Events:
         if time.strftime("%H:%M") >= when and not self.should_hold():
             self.briefed = today
             self._ask("Give Sir his morning briefing, spoken, four sentences at most: the date, "
-                      "his classes today (class_schedule tool), "
+                      "his classes today (class_schedule tool; if school_days says there is no "
+                      "school today, say that instead), "
                       "whether the Minecraft server is up, any background jobs that finished, and "
                       "anything in your memory he asked to be reminded of today. Use your tools.")
 
@@ -590,6 +665,7 @@ class Events:
                     if c["watch_gpu"]:
                         self.check_gpu()
                     self.check_briefing()
+                    self.check_school()
                 if tick % 60 == 30:                   # every ten minutes
                     self.check_prs()
             except Exception as exc:                  # noqa: BLE001 -- never let the loop die
