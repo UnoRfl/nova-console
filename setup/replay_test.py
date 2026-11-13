@@ -83,7 +83,10 @@ async def build() -> dict:
 
 
 def verdict(ears: E.Ears, path: Path) -> list[dict]:
-    ears.armed_until = ears.followup_until = 0.0
+    # Each clip is its own conversation: clear every window, including a held
+    # request and the mid-sentence grace, or one clip's state leaks into the next.
+    ears.armed_until = ears.followup_until = ears.engaged_until = 0.0
+    ears.held = None
     return ears.run_file(path)
 
 

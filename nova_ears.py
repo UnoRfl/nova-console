@@ -60,6 +60,7 @@ DEFAULTS = {
     "whisper_device": "auto",         # auto = GPU if it loads, else CPU
     "speaker_threshold": 0.45,        # cosine similarity needed to count as you
     "speaker_threshold_short": 0.38,  # for clips under 1.2 s, which score lower
+    "speaker_threshold_window": 0.30, # while a window HE opened is live (after "Nova", follow-up)
     "end_silence": 0.6,               # seconds of quiet that split speech into pieces
     "settle_seconds": 0.3,            # extra quiet before a finished-sounding request is sent
     "unfinished_seconds": 1.3,        # extra quiet allowed when it sounds cut off ("open the...")
@@ -399,6 +400,15 @@ class Ears:
         if score is not None:
             need = (self.cfg["speaker_threshold_short"] if dur < 1.2
                     else self.cfg["speaker_threshold"])
+            # Inside a window she opened for HIS verified voice (a bare "Nova",
+            # her follow-up, a held request), the next sentence regularly scores
+            # 0.36-0.45 and was thrown away -- the log showed it every time.
+            # Outside a window other voices stay under ~0.35, so the strict bar
+            # still guards wakes; only an already-open window gets the lower one.
+            started = now - dur - float(self.cfg["end_silence"])
+            if (started < max(self.armed_until, self.followup_until)
+                    or self.held is not None):
+                need = min(need, self.cfg["speaker_threshold_window"])
             if score < need:
                 self.stats["not_you"] += 1
                 out["why"] = "not your voice"
@@ -508,7 +518,7 @@ class Ears:
                     h["recheck"] = now + 0.3
                     score = self.speaker.score(recent[-int(RATE * 0.8):])
                     h["his"] = (score is not None
-                                and score >= self.cfg["speaker_threshold_short"])
+                                and score >= self.cfg["speaker_threshold_window"])
                 if h.get("his"):
                     return
         self.held = None
@@ -677,10 +687,14 @@ class Ears:
         samples = read_audio(path)
         vad = make_vad(self.cfg)
         results = []
-        clock = 0.0                                   # a fake clock that follows the audio
+        # A fake clock that follows the audio. It starts far from zero: windows
+        # are judged by when speech STARTED (now - dur - end_silence), and from
+        # a zero base that is negative, i.e. "inside" a closed window (0.0).
+        base = 1_000_000.0
+        clock = base
         for i in range(0, len(samples) - WINDOW + 1, WINDOW):
             vad.accept_waveform(samples[i:i + WINDOW])
-            clock = i / RATE
+            clock = base + i / RATE
             while not vad.empty():
                 seg = np.asarray(vad.front.samples, dtype=np.float32)
                 vad.pop()

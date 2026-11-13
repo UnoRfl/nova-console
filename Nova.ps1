@@ -27,7 +27,11 @@ param(
     [Parameter(Position = 1)]
     [string]$Arg = '',
 
-    [int]$Port = 8765
+    [int]$Port = 8765,
+
+    # Start here even if this shell sits inside a job object. Only the "Nova"
+    # scheduled task passes it (it is already outside any job).
+    [switch]$Direct
 )
 
 $ErrorActionPreference = 'Stop'
@@ -145,10 +149,103 @@ function Invoke-Status {
     } else {
         Write-Host '  autostart   off -- run  .\Nova.ps1 install  to make it permanent'
     }
+    if (Test-NovaTask) {
+        Write-Host '  self-heal   ON  (Task Scheduler "Nova": login + every 5 min, outside Claude)' -ForegroundColor Green
+    } else {
+        Write-Host '  self-heal   off -- run  .\Nova.ps1 install' -ForegroundColor Yellow
+    }
     Write-Host ''
 }
 
+# ------------------------------------------------- surviving closed sessions
+# The Claude desktop app runs its shells AND its terminal panel inside a Windows
+# job object. Anything started from there is killed with the job when the
+# session or app closes -- that is how all of NOVA went silent on 2026-11-13
+# with nothing in the logs. Task Scheduler is NOT an escape: it wraps each task
+# in a job of its own (measured). Explorer -- the desktop shell -- is in no job,
+# and `explorer.exe file.vbs` hands the file to the running shell to open, so
+# everything NovaLaunch.vbs starts is a child of Explorer, outside every job.
+# Both an in-job start and the 5-minute "Nova" task go that way.
+$TaskName = 'Nova'
+$NovaLaunchVbs = Join-Path $Root 'NovaLaunch.vbs'
+
+function Test-InJob {
+    try {
+        if (-not ('NovaJob' -as [type])) {
+            Add-Type -Namespace '' -Name 'NovaJob' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern bool IsProcessInJob(System.IntPtr process, System.IntPtr job, out bool result);
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetCurrentProcess();
+'@
+        }
+        $r = $false
+        [void][NovaJob]::IsProcessInJob([NovaJob]::GetCurrentProcess(), [IntPtr]::Zero, [ref]$r)
+        return $r
+    } catch { return $false }
+}
+
+function Test-NovaTask {
+    & schtasks.exe /query /tn $TaskName 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Register-NovaTask {
+    # At logon, plus every 5 minutes forever: if everything (watchdog included)
+    # is ever killed, she is back within 5 minutes with nobody touching it.
+    $user  = "$env:USERDOMAIN\$env:USERNAME"
+    $start = (Get-Date).AddMinutes(1).ToString('yyyy-MM-ddTHH:mm:ss')
+    $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Keeps NOVA running outside any job object (Nova.ps1).</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>$user</UserId></LogonTrigger>
+    <TimeTrigger>
+      <Enabled>true</Enabled><StartBoundary>$start</StartBoundary>
+      <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>$user</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>explorer.exe</Command><Arguments>"$NovaLaunchVbs"</Arguments></Exec></Actions>
+</Task>
+"@
+    $tmp = Join-Path $env:TEMP 'nova-task.xml'
+    [IO.File]::WriteAllText($tmp, $xml, [Text.Encoding]::Unicode)
+    & schtasks.exe /create /tn $TaskName /xml $tmp /f 2>&1 | Out-Null
+    $ok = ($LASTEXITCODE -eq 0)
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    return $ok
+}
+
+function Invoke-StartViaTask {
+    if (-not (Test-NovaTask)) { [void](Register-NovaTask) }
+    Write-Host 'this shell is inside a job (Claude app/terminal) -- starting through Explorer so NOVA outlives it'
+    & explorer.exe "$NovaLaunchVbs"
+    for ($i = 0; $i -lt 60; $i++) {
+        if ((Test-Port $Port) -and (Get-TrackedProcess $WatchPid) -and (Get-TrackedProcess $WakePid)) { break }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Invoke-Start {
+    # One start at a time: the 5-minute task, the login script and the
+    # watchdog can all call this, and two at once would double-launch.
+    $mutex = New-Object System.Threading.Mutex($false, 'Local\NovaStart')
+    try { [void]$mutex.WaitOne(60000) } catch [System.Threading.AbandonedMutexException] { }
+    try { Invoke-StartInner } finally { try { $mutex.ReleaseMutex() } catch { } ; $mutex.Dispose() }
+}
+
+function Invoke-StartInner {
     $py = Get-Python
     if (-not $py) { Write-Host 'python is not on PATH.' -ForegroundColor Red; return }
 
@@ -315,6 +412,9 @@ shell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Fi
     } else {
         Write-Host 'Install failed: the launcher was not created.' -ForegroundColor Red
     }
+    # schtasks.exe (not Register-ScheduledTask) works on this PC.
+    if (Register-NovaTask) { Write-Host 'installed  Task Scheduler "Nova" (self-heal every 5 min)' -ForegroundColor Green }
+    else { Write-Host 'could not register the "Nova" scheduled task' -ForegroundColor Yellow }
 }
 
 function Invoke-Uninstall {
@@ -324,6 +424,10 @@ function Invoke-Uninstall {
         Write-Host "removed  $vbs"
     } else {
         Write-Host "absent   $vbs"
+    }
+    if (Test-NovaTask) {
+        & schtasks.exe /delete /tn $TaskName /f 2>&1 | Out-Null
+        Write-Host "removed  scheduled task $TaskName"
     }
     # Clean up scheduled tasks from the older install path, if any took.
     foreach ($t in @($TaskBridge, $TaskWake)) {
@@ -348,9 +452,10 @@ function Invoke-Logs {
 
 switch ($Command) {
     'status'    { Invoke-Status }
-    'start'     { Invoke-Start;  Invoke-Status }
+    'start'     { if (-not $Direct -and (Test-InJob)) { Invoke-StartViaTask } else { Invoke-Start }; Invoke-Status }
     'stop'      { Invoke-Stop }
-    'restart'   { Invoke-Stop; Start-Sleep -Milliseconds 700; Invoke-Start; Invoke-Status }
+    'restart'   { Invoke-Stop; Start-Sleep -Milliseconds 700
+                  if (-not $Direct -and (Test-InJob)) { Invoke-StartViaTask } else { Invoke-Start }; Invoke-Status }
     'model'     { Invoke-Model $Arg }
     'orb'       {
                   # The orb re-reads orb.json while it runs, so this takes
