@@ -598,19 +598,35 @@ class Events:
 
         def read(url: str) -> str | None:
             r = nova_tools._hands("scan", timeout=120, url=url)
-            return None if r.get("error") else r.get("text")
+            # Signed out, mid sign-in or a checkpoint: nothing to read this time.
+            if r.get("error") or re.search(r"facebook\.com/(?:login|checkpoint|two_step|recover)", r.get("url", "")):
+                return None
+            return r.get("text")
 
-        new = nova_school.gather(read, force=force)
+        got = nova_school.gather(read, force=force)
+        new, posts = got["worthy"], got["posts"]
+        plain = nova_school.post_lines(posts) if nova_school.cfg().get("announce_all_posts", True) else []
         if not new:
-            return {"new": 0, "tell": [], "no_school": {}}
+            for line in plain:
+                if self.activity:
+                    self.activity.push("system", "New post", line[:120])
+                self.announce(line)
+            return {"new": 0, "posts": len(posts), "tell": [], "no_school": {}}
         reply = self._check(nova_school.judge_prompt(new)) if self._check else None
-        if reply is None:                             # no engine right now: look again next time
+        if reply is None:                             # no engine right now: say the posts, judge later
             s = nova_school.load_state()
             gone = {nova_school.fingerprint(it) for it in new}
             s["seen"] = [f for f in s["seen"] if f not in gone]
             nova_school.save_state(s)
-            return {"new": len(new), "tell": [], "no_school": {}, "deferred": True}
+            for line in plain:
+                self.announce(line)
+            return {"new": len(new), "posts": len(posts), "tell": [], "no_school": {}, "deferred": True}
         tell, off = nova_school.parse_judgement(reply)
+        if not tell:                                  # nothing important: still tell him they posted
+            tell_plain = plain
+        else:                                         # the TELL covers that page's notice; say the other pages' posts
+            judged = {it["source"].replace(" (Facebook)", "") for it in new}
+            tell_plain = nova_school.post_lines([p for p in posts if p["source"] not in judged])
         known = nova_school.load_state()["no_school"]
         if off and tell and all(d in known for d in off):
             tell = []                                 # the same suspension, seen in another post
@@ -624,7 +640,11 @@ class Events:
             if self.activity:
                 self.activity.push("system", "School notice", line[:120])
             self.announce(line if line.lower().startswith("sir") else "Sir, " + line, urgent=bool(soon))
-        return {"new": len(new), "tell": tell, "no_school": off}
+        for line in tell_plain:
+            if self.activity:
+                self.activity.push("system", "New post", line[:120])
+            self.announce(line)
+        return {"new": len(new), "posts": len(posts), "tell": tell, "no_school": off}
 
     def check_briefing(self) -> None:
         when = cfg()["briefing_time"]

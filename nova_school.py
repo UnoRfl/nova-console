@@ -44,7 +44,10 @@ DEFAULTS = {
     ],
     "searches": ['"his city" ("walang pasok" OR "class suspension" OR "suspendido ang klase" OR "no classes")',
                  '"school" "his city" (suspension OR "walang pasok" OR advisory)'],
-    "page_minutes": 20,          # how often the Facebook pages are read (4am-11pm)
+    "page_minutes": 20,          # how often the Facebook pages are read (4am-11pm)...
+    "busy_minutes": 5,           # ...and this often in the busy hours, so he hears before school
+    "busy_hours": "06:00-12:00",
+    "announce_all_posts": True,  # say every new post on those pages, not only notices
     "search_minutes": 60,        # how often Google is asked (kept low: captchas)
     "morning": "05:30",          # "no school today" is said from this time on
     "evening": "20:00",          # "no school tomorrow" heads-up
@@ -57,8 +60,16 @@ WORTHY = re.compile(
     r"pagasa|baha|flood|habagat|advisory|announcement|anunsyo|abiso|paalala|online\s+class|"
     r"asynchronous|modular|enrol+ment|exam(?:ination)?s?\b|deadline|cancel+ed|postpone|"
     r"resumption|work\s+(?:is\s+)?suspended|#walangpasok", re.I)
-STAMP = re.compile(r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}"
-                   r"(?:\s+at\s+\d{1,2}:\d{2}\s*[AP]M)?")
+# A post's full date, in English or in Filipino (his Facebook is in Filipino):
+# "Friday, November 13, 2026 at 3:00 PM" / "Miyerkules, Nobyembre 11, 2026 nang 10:17 AM".
+STAMP = re.compile(r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+                   r"Linggo|Lunes|Martes|Miyerkules|Huwebes|Biyernes|Sabado),\s+\w+\s+\d{1,2},\s+\d{4}"
+                   r"(?:\s+(?:at|nang)\s+\d{1,2}:\d{2}\s*[AP]M)?")
+# Where a post's own text ends: reactions, the comment box, comments.
+POST_END = re.compile(r"^(?:\d+(?:\.\d+)?[KkMm]?|All reactions:?|Like|Comment|Share|I-like|I-share|Mag-comment|"
+                      r"Mag-reply|Reply|Tingnan pa ang mga komento|View more comments|Sumulat ng comment.*|"
+                      r"Write a comment.*|Most relevant|Pinakamahalaga)$")
+UNFOLD = re.compile(r"…?\s*(?:See more|Tumingin pa|See translation|Tingnan ang pagsasalin)\s*$")
 BOILER = re.compile(r"^(?:Log In|Forgot (?:Account|password)\??|Like|Comment|Share|All reactions:?|\d+|"
                     r"Online status indicator|Active(?: status indicator)?|See more from .*|Email or phone number|"
                     r"Password|or|Create new account|Privacy|· Terms|· Advertising|· Ad Choices|· Cookies|"
@@ -97,7 +108,7 @@ def load_state() -> dict:
 
 
 def save_state(s: dict) -> None:
-    s["seen"] = s["seen"][-600:]
+    s["seen"] = s["seen"][-1500:]
     s["notices"] = s["notices"][-60:]
     cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 40 * 86400))
     s["no_school"] = {d: r for d, r in s["no_school"].items() if d >= cutoff}
@@ -183,6 +194,88 @@ def upcoming(days: int = 30, now: float | None = None) -> list[str]:
 
 # ------------------------------------------------------------------- notices
 
+RELATIVE = re.compile(r"^(?:\d{1,2}[mhd]|\d{1,2}\s+(?:min|mins|hrs?|hours?)|Just now|Yesterday at \d{1,2}:\d{2}\s*[AP]M|"
+                      r"(?:January|February|March|April|May|June|July|August|September|October|November|December|"
+                      r"Enero|Pebrero|Marso|Abril|Mayo|Hunyo|Hulyo|Agosto|Setyembre|Oktubre|Nobyembre|Disyembre)"
+                      r"\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[AP]M)?)$")
+EMOJI = re.compile("[🀀-🫿☀-➿️‍‼⁉]")
+
+
+def _chunks(text: str) -> list[tuple[str, list[str]]]:
+    """Facebook page text -> [(full date, body lines)], one per post. A post
+    starts at its full date line; its text stops at the reaction counts or
+    comment box, so comments (with their own "26m" times) never count as posts
+    and a new comment never makes an old post look new."""
+    chunks, cur, stamp, open_ = [], [], "", False
+    for raw in text.splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        m = STAMP.search(ln)
+        if m:
+            if stamp and cur:
+                chunks.append((stamp, cur))
+            cur, stamp, open_ = [], m.group(0), True
+            continue
+        if not open_:
+            continue
+        if POST_END.match(ln):
+            open_ = False
+            continue
+        if RELATIVE.match(ln) or ln in ("·", "Online", "Online status indicator") or ln.endswith("ang nakalipas"):
+            continue
+        cur.append(UNFOLD.sub("", ln).strip())
+    if stamp and cur:
+        chunks.append((stamp, cur))
+    return [(st, [b for b in body if b]) for st, body in chunks]
+
+
+def headline(body: list[str] | str, limit: int = 140) -> str:
+    """The first readable sentence of a post, fit to be spoken."""
+    import unicodedata
+    t = " ".join(body) if isinstance(body, list) else body
+    t = unicodedata.normalize("NFKC", t)               # 𝗦𝗘𝗘 𝗬𝗢𝗨 -> SEE YOU
+    t = EMOJI.sub(" ", t)
+    t = re.sub(r"#\w+|https?://\S+|…|See more|Tumingin pa|See translation", " ", t)
+    t = " ".join(t.split()).strip(" -|·:")
+    if len(t) > limit:
+        cut = re.search(r"^(.{40,%d}?[.!?])\s" % limit, t)
+        t = cut.group(1) if cut else t[:limit].rsplit(" ", 1)[0] + "..."
+    return t
+
+
+def post_fp(body: str) -> str:
+    """Stable id for a post: its opening words (the same folded or unfolded)."""
+    import unicodedata
+    core = re.sub(r"\W+", "", unicodedata.normalize("NFKC", body).lower())[:90]
+    return "p" + hashlib.sha1(core.encode("utf-8")).hexdigest()[:15]
+
+
+MONTHS = {m: i + 1 for i, names in enumerate(
+    [("january", "enero"), ("february", "pebrero"), ("march", "marso"), ("april", "abril"), ("may", "mayo"),
+     ("june", "hunyo"), ("july", "hulyo"), ("august", "agosto"), ("september", "setyembre"),
+     ("october", "oktubre"), ("november", "nobyembre"), ("december", "disyembre")]) for m in names}
+
+
+def post_date(stamp: str) -> str:
+    """"Miyerkules, Nobyembre 11, 2026 nang 10:17 AM" -> "2026-11-11" ("" if unknown)."""
+    m = re.search(r",\s+(\w+)\s+(\d{1,2}),\s+(\d{4})", stamp or "")
+    if not m or m.group(1).lower() not in MONTHS:
+        return ""
+    return f"{m.group(3)}-{MONTHS[m.group(1).lower()]:02d}-{int(m.group(2)):02d}"
+
+
+def split_all(text: str, source: str) -> list[dict]:
+    """Every post on a Facebook page, newest first, with a spoken headline."""
+    out = []
+    for stamp, body in _chunks(text):
+        joined = " ".join(body)
+        if not stamp or len(re.sub(r"\W+", "", joined)) < 4:       # the page header, not a post
+            continue
+        out.append({"source": source, "stamp": stamp, "text": joined[:1200], "headline": headline(body), "post": True})
+    return out
+
+
 def split_posts(text: str, source: str) -> list[dict]:
     """Facebook / Google page text -> chunks worth a look, each with its timestamp."""
     lines = [ln.strip() for ln in text.splitlines()]
@@ -210,6 +303,8 @@ def split_posts(text: str, source: str) -> list[dict]:
 
 
 def fingerprint(item: dict) -> str:
+    if item.get("post"):
+        return post_fp(item["text"])
     core = re.sub(r"\W+", "", item["text"].lower())[60:260] or re.sub(r"\W+", "", item["text"].lower())
     return hashlib.sha1(core.encode("utf-8")).hexdigest()[:16]
 
@@ -254,18 +349,41 @@ def parse_judgement(reply: str) -> tuple[list[str], dict]:
     return tell, off
 
 
-def gather(read, now: float | None = None, force: bool = False) -> list[dict]:
-    """New worthy snippets since last time. read(url) -> page text or None."""
+def gather(read, now: float | None = None, force: bool = False) -> dict:
+    """New since last time: {"worthy": snippets for the judge, "posts": new page posts}.
+    read(url) -> page text or None. The first time a page is read, what is
+    already there is noted silently, so signing in does not replay a feed."""
     now = time.time() if now is None else now
     c = cfg()
     s = load_state()
+    s.setdefault("baselined", [])
     found: list[dict] = []
-    if force or now - s["last_pages"] >= float(c["page_minutes"]) * 60:
+    posts: list[dict] = []
+    hm = time.strftime("%H:%M", time.localtime(now))
+    a, _, b = str(c.get("busy_hours") or "").partition("-")
+    every = float(c["busy_minutes"] if a and b and a <= hm < b else c["page_minutes"]) * 60
+    if force or now - s["last_pages"] >= every:
         s["last_pages"] = now
         for p in c["pages"]:
             text = read(p["url"])
-            if text:
-                found += split_posts(text, p["name"] + " (Facebook)")
+            if not text:
+                continue
+            page_posts = split_all(text, p["name"])
+            found += [dict(x, source=p["name"] + " (Facebook)") for x in page_posts if WORTHY.search(x["text"])]
+            if p["name"] not in s["baselined"]:
+                if page_posts:
+                    s["baselined"].append(p["name"])
+                    s["seen"] += [post_fp(x["text"]) for x in page_posts]
+                    found = [f for f in found if not f["source"].startswith(p["name"])]
+                continue
+            # Only fresh posts are news: a pinned post from last year that
+            # scrolls into view is noted, not announced.
+            fresh = time.strftime("%Y-%m-%d", time.localtime(now - 2 * 86400))
+            for x in page_posts:
+                if (post_date(x["stamp"]) or "9999") >= fresh:
+                    posts.append(x)
+                else:
+                    s["seen"].append(post_fp(x["text"]))
     if force or now - s["last_search"] >= float(c["search_minutes"]) * 60:
         s["last_search"] = now
         for q in c["searches"]:
@@ -273,7 +391,7 @@ def gather(read, now: float | None = None, force: bool = False) -> list[dict]:
             text = read(url)
             if text and not re.search(r"unusual traffic|not a robot|captcha", text[:3000], re.I):
                 found += split_posts(text, "Google, past day")
-    new = []
+    new, new_posts = [], []
     with _lock:
         for it in found:
             fp = fingerprint(it)
@@ -281,8 +399,28 @@ def gather(read, now: float | None = None, force: bool = False) -> list[dict]:
                 continue
             s["seen"].append(fp)
             new.append(it)
+        for it in posts:
+            fp = post_fp(it["text"])
+            if fp in s["seen"]:
+                continue
+            s["seen"].append(fp)
+            new_posts.append(it)
         save_state(s)
-    return new
+    return {"worthy": new, "posts": new_posts}
+
+
+def post_lines(posts: list[dict]) -> list[str]:
+    """One spoken line per page: "Sir, his school just posted: ..." """
+    by: dict[str, list[str]] = {}
+    for p in posts:
+        by.setdefault(p["source"], []).append(p["headline"] or "a new post")
+    out = []
+    for src, heads in by.items():
+        if len(heads) == 1:
+            out.append(f"Sir, {src} just posted: {heads[0]}")
+        else:
+            out.append(f"Sir, {src} posted {len(heads)} times: " + "; ".join(heads[:3]))
+    return out
 
 
 def record(items: list[dict], tell: list[str], off: dict, now: float | None = None) -> None:

@@ -421,11 +421,13 @@ class Voice:
         """
         return SpeechStream(self, voice, replace)
 
-    def say(self, text: str, voice: str | None = None, replace: bool = True) -> dict:
-        """Speak text. Blocks until finished or interrupted."""
+    def say(self, text: str, voice: str | None = None, replace: bool = True, record: bool = True) -> dict:
+        """Speak text. Blocks until finished or interrupted. record=False for a
+        repeat, so "repeat that" twice still repeats the original."""
         if not speakable(text):
             return {"ok": True, "spoken": 0, "interrupted": False}
         st = self.open_stream(voice, replace)
+        st.record = record
         st.feed(text)
         st.close()
         return st.wait()
@@ -465,6 +467,36 @@ class Voice:
             return False
 
 
+SAID_FILE = Path.home() / ".nova" / "said.json"
+_said_lock = threading.Lock()
+
+
+def remember_said(text: str) -> None:
+    """Keep what she said aloud, so "repeat that" has something to repeat.
+    Tiny acknowledgements ("Very good, Sir.") are not worth repeating."""
+    text = " ".join(str(text or "").split())
+    if len(text) < 20:
+        return
+    with _said_lock:
+        try:
+            items = json.loads(SAID_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            items = []
+        items = (items + [{"at": time.time(), "text": text[:2000]}])[-20:]
+        try:
+            SAID_FILE.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+
+def last_said(n: int = 1) -> list[dict]:
+    """The last n things she said aloud, oldest first."""
+    try:
+        return json.loads(SAID_FILE.read_text(encoding="utf-8"))[-n:]
+    except (OSError, ValueError):
+        return []
+
+
 class SpeechStream:
     """One spoken reply, fed a piece at a time. See Voice.open_stream()."""
 
@@ -476,15 +508,20 @@ class SpeechStream:
         self.done = threading.Event()
         self.result: dict = {}
         self.fed = 0
+        self.record = True
+        self.parts: list[str] = []
         threading.Thread(target=self._run, daemon=True).start()
 
     def feed(self, text: str) -> None:
         clean = speakable(text)
         if clean:
             self.fed += 1
+            self.parts.append(clean)
             self.texts.put(clean)
 
     def close(self) -> None:
+        if self.record and self.parts:
+            remember_said(" ".join(self.parts))
         self.texts.put(None)
 
     def wait(self, timeout: float | None = None) -> dict:

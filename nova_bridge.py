@@ -873,6 +873,34 @@ def ack_reply(prompt: str) -> str | None:
     return "Very good, Sir."
 
 
+REPEAT = re.compile(
+    r"^(?:(?:sorry|uh+|um+|wait|what|huh|nova)[,.!?]?\s+)*(?:(?:can|could|would) you\s+|please\s+)?(?:"
+    r"repeat(?: (?:that|it|yourself|what you (?:just )?said|the last (?:thing|one|part)))?|"
+    r"say (?:that|it) again|(?:can you )?say again|one more time|come again|pardon(?: me)?|"
+    r"what (?:did|was it) you (?:just )?(?:say|said|tell me)|what was that|what did you (?:just )?(?:say|tell me)|"
+    r"(?:did you (?:just )?)?(?:repeat|say) what you (?:just )?said(?: to me)?|"
+    r"i (?:didn'?t|did not|couldn'?t|could not) (?:hear|catch|get) (?:that|it|you|what you (?:just )?said)|"
+    r"what was the last thing you said)"
+    r"(?:[,.!?]?\s*(?:please|again|to me|sir|nova|i (?:didn'?t|did not) (?:hear|catch) (?:it|that|you)"
+    r"|sorry))*[.!?]*$")
+BEFORE = re.compile(r"\b(?:before that|the one before|the other one|previous one)\b")
+
+
+def repeat_command(prompt: str) -> str | None:
+    """Her last spoken line again if he asked her to repeat it, else None.
+    No model: replies, announcements and reminders are all kept by nova_voice."""
+    said = " ".join(re.sub(r"[^a-z' .,!?]+", " ", (prompt or "").lower().replace("’", "'")).split())
+    if not said or len(said) > 90:
+        return None
+    back = 2 if BEFORE.search(said) else 1
+    if not (REPEAT.match(BEFORE.sub("", said).strip(" ,.?!")) or (back == 2 and re.search(r"\b(?:repeat|say)\b", said))):
+        return None
+    items = nova_voice.last_said(back) if nova_voice else []
+    if len(items) < back:
+        return "I haven't said anything yet that I can repeat, Sir."
+    return items[0]["text"]
+
+
 def orb_command(prompt: str) -> str | None:
     """"Nova, hide" / "come back" / "lock the orb": which of those this is, if any.
 
@@ -2537,6 +2565,16 @@ class Handler(BaseHTTPRequestHandler):
                                 "memories": len(load_memories(limit=10_000))})
                 return
 
+            again = repeat_command(prompt)
+            if again:
+                log(f"repeat (no model): {again[:80]}")
+                self.server.activity.push("system", "Repeat", again[:120])
+                spoken = self.server.speak_now(again, record=False) if body.get("speak") else False
+                self.send_json({"text": again, "ms": 0, "turns": 0, "denials": 0,
+                                "remembered": [], "repeat": True, "spoken": spoken,
+                                "memories": len(load_memories(limit=10_000))})
+                return
+
             pc = panel_command(prompt, time.time() - self.server.panel_seen < 6
                                        or channel == "panel")
             if pc:
@@ -2916,11 +2954,12 @@ def main() -> int:
 
     httpd.announce = announce
 
-    def speak_now(text: str, replace: bool = True) -> bool:
+    def speak_now(text: str, replace: bool = True, record: bool = True) -> bool:
         """Speak a short fixed line as the reply to a request. True if it will be spoken."""
         if not nova_voice or cfg.get("tts", "kokoro") != "kokoro" or nova_voice.shared().error:
             return False
         stream = nova_voice.shared().open_stream(replace=replace)
+        stream.record = record
         stream.feed(text)
         stream.close()
         backend.speech = stream                       # so /api/speak {streamed} waits on it

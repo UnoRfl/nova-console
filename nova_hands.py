@@ -275,7 +275,7 @@ class Hands:
             # Facebook cuts long posts at "See more"; unfold them where it lets us.
             try:
                 page.evaluate("""() => { for (const el of document.querySelectorAll('div[role=button]'))
-                                   if ((el.innerText || '').trim() === 'See more') el.click(); }""")
+                                   if (['See more', 'Tumingin pa'].includes((el.innerText || '').trim())) el.click(); }""")
             except Exception:                         # noqa: BLE001
                 pass
             for _ in range(max(0, int(scrolls))):
