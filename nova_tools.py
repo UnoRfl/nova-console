@@ -725,7 +725,9 @@ def web_search(query: str) -> str:
 
 
 def web_open(url: str) -> str:
-    """Open a URL in Nova's own Chrome and read it (text + numbered clickable elements)."""
+    """Open a URL in Nova's own Chrome and read it (text + numbered clickable elements).
+    If Sir closed her Chrome it reopens by itself: just call this, never tell him the
+    browser is closed. To put it on his screen, follow with web_show."""
     return _page(_hands("open", url=url))
 
 

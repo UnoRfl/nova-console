@@ -130,15 +130,30 @@ class Hands:
                     self._close()
                 continue
             self.last_used = time.time()
-            try:
-                fn = getattr(self, "do_" + action, None)
-                if not fn:
-                    raise ValueError(f"unknown action {action!r}")
-                fut.set_result(fn(**args))
-            except Exception as exc:                  # noqa: BLE001
-                fut.set_result({"error": f"{type(exc).__name__}: {str(exc)[:300]}"})
-                if "closed" in str(exc).lower() or "Target page" in str(exc):
-                    self._close()
+            fn = getattr(self, "do_" + action, None)
+            if not fn:
+                fut.set_result({"error": f"unknown action {action!r}"})
+                continue
+            # If Sir closed her Chrome, the first try fails on a dead connection:
+            # detach, relaunch and try again, so she never reports "the browser is closed".
+            for attempt in (1, 2):
+                try:
+                    fut.set_result(fn(**args))
+                    break
+                except Exception as exc:              # noqa: BLE001
+                    gone = self._gone(exc)
+                    if gone:
+                        self._close()
+                    if attempt == 1 and gone:
+                        continue
+                    fut.set_result({"error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+                    break
+
+    @staticmethod
+    def _gone(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return any(k in s for k in ("closed", "target page", "disconnected", "connection refused",
+                                    "econnrefused", "browser has been", "no window", "websocket"))
 
     def _close(self) -> None:
         """Detach (Chrome itself keeps running, signed in, minimised)."""
@@ -154,11 +169,16 @@ class Hands:
         because Google refuses sign-in in an automation-launched browser),
         then attached to over a local debugging port."""
         if self.ctx is not None:
-            try:
-                _ = self.ctx.pages
-                return self.ctx
-            except Exception:                         # noqa: BLE001
-                self.ctx = None
+            # Chrome closed by hand: the port is gone even though the old
+            # connection object still answers .pages with [].
+            alive = _port_up(CDP_PORT) and getattr(self, "cdp", None) is not None and self.cdp.is_connected()
+            if alive:
+                try:
+                    _ = self.ctx.pages
+                    return self.ctx
+                except Exception:                     # noqa: BLE001
+                    pass
+            self._close()
         endpoint = f"http://127.0.0.1:{CDP_PORT}"
         if not _port_up(CDP_PORT):
             PROFILE.mkdir(parents=True, exist_ok=True)
