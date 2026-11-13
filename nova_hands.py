@@ -174,11 +174,9 @@ class Hands:
         self.pw = sync_playwright().start()
         while True:
             try:
-                action, args, fut = self.jobs.get(timeout=60)
+                action, args, fut = self.jobs.get(timeout=5)
             except queue.Empty:
-                # Idle for 20 minutes: close the browser, keep the service.
-                if self.ctx and time.time() - self.last_used > 1200:
-                    self._close()
+                self._tidy()
                 continue
             self.last_used = time.time()
             fn = getattr(self, "do_" + action, None)
@@ -205,6 +203,59 @@ class Hands:
         s = str(exc).lower()
         return any(k in s for k in ("closed", "target page", "disconnected", "connection refused",
                                     "econnrefused", "browser has been", "no window", "websocket"))
+
+    def _tidy(self) -> None:
+        """Sir, 2026-11-13: do not leave her Chrome open once she is done.
+        Work done in the background closes Chrome `close_after_seconds` (45)
+        after her last action. A window she put in front of him for him to
+        look at stays while he is on it, and closes `close_shown_after_seconds`
+        (120) after her last action once he has moved to something else.
+        0 switches either off. Sign-ins live in the profile, so closing costs
+        nothing but a second or two on the next use."""
+        if not _port_up(CDP_PORT):
+            if self.ctx is not None:
+                self._close()
+            self.shown = False
+            return
+        if self.ctx is None:
+            # Her Chrome is up but this service is not attached (it was
+            # restarted, or the window was left from earlier). Port 9333 is
+            # only ever her profile, so attach and treat it as a window he
+            # may be looking at: it closes once he is not on it.
+            try:
+                self.browser()
+                self.shown = True
+            except Exception:                         # noqa: BLE001
+                return
+        try:
+            hands = json.loads((ROOT / "config.json").read_text(encoding="utf-8")).get("hands") or {}
+        except Exception:                             # noqa: BLE001
+            hands = {}
+        shown = bool(getattr(self, "shown", False))
+        try:
+            limit = float(hands.get("close_shown_after_seconds", 120) if shown
+                          else hands.get("close_after_seconds", 45))
+        except (TypeError, ValueError):
+            limit = 120.0 if shown else 45.0
+        if limit <= 0 or time.time() - self.last_used < limit:
+            return
+        if shown and _exe_of(_foreground()).lower().endswith("chrome.exe"):
+            return                                    # he is looking at it
+        self._quit()
+
+    def _quit(self) -> None:
+        """Close her Chrome properly (a normal exit, so cookies are saved)."""
+        try:
+            self.cdp.new_browser_cdp_session().send("Browser.close")
+        except Exception:                             # noqa: BLE001 -- already going
+            pass
+        for _ in range(20):
+            if not _port_up(CDP_PORT):
+                break
+            time.sleep(0.25)
+        self._close()
+        self.shown = False
+        self._current = None
 
     def _close(self) -> None:
         """Detach (Chrome itself keeps running, signed in, minimised)."""
@@ -428,6 +479,7 @@ class Hands:
         cdp.send("Browser.setWindowBounds", {"windowId": win,
                                              "bounds": {"windowState": "normal" if visible else "minimized"}})
         front = False
+        self.shown = bool(visible)
         if visible:
             page.bring_to_front()
             front = self._to_foreground(page)
