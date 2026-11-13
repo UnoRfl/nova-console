@@ -38,7 +38,7 @@ out = T.server_status();    check("server_status (headless over ssh)", "minecraf
 out = T.minecraft_players(); check("minecraft_players", "player" in out.lower(), out[:80].replace("\n", " "))
 
 # the MCP server itself, over stdio
-proc = subprocess.Popen([sys.executable, str(ROOT / "nova_tools.py")], stdin=subprocess.PIPE,
+proc = subprocess.Popen(creationflags=0x08000000, args=[sys.executable, str(ROOT / "nova_tools.py")], stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
 
 

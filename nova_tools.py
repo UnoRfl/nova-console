@@ -869,7 +869,7 @@ def open_settings(page: str = "") -> str:
     key = page.strip().lower()
     uri = "ms-settings:" + SETTINGS_PAGES.get(key, re.sub(r"[^a-z0-9-]", "", key))
     import subprocess
-    subprocess.Popen(["explorer.exe", uri])
+    subprocess.Popen(creationflags=0x08000000, args=["explorer.exe", uri])
     return f"Opened Settings ({uri}). Use desktop_look window=\"Settings\" next."
 
 

@@ -194,7 +194,7 @@ def _whatsapp():
     auto = _auto()
     win = auto.WindowControl(searchDepth=1, Name="WhatsApp", ClassName="WinUIDesktopWin32WindowClass")
     if not win.Exists(0.5):
-        subprocess.Popen(["explorer.exe", WHATSAPP_APP])
+        subprocess.Popen(creationflags=0x08000000, args=["explorer.exe", WHATSAPP_APP])
         if not win.Exists(15):
             raise RuntimeError("WhatsApp did not open. Is the WhatsApp app installed and signed in?")
     grid = win.DataGridControl(searchDepth=20, Name="Chat list")

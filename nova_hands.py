@@ -189,7 +189,7 @@ class Hands:
             if not self.show:
                 args.append("--start-minimized")
             import subprocess
-            subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            subprocess.Popen(args, creationflags=0x08000000, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, close_fds=True)
             for _ in range(60):
                 if _port_up(CDP_PORT):

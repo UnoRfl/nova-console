@@ -62,7 +62,7 @@ TEST_DIR = Path(tempfile.mkdtemp(prefix="nova-test-"))   # the test bridge write
 M.DB_FILE = TEST_DIR / "memory.db"                     # so read its memory, not the live one
 env = dict(os.environ, NOVA_VOICE_VOLUME="0", NOVA_TEST="1", NOVA_TEST_DIR=str(TEST_DIR),
            PYTHONIOENCODING="utf-8")
-proc = subprocess.Popen([sys.executable, str(ROOT / "nova_bridge.py"), "--port", str(PORT)],
+proc = subprocess.Popen(creationflags=0x08000000, args=[sys.executable, str(ROOT / "nova_bridge.py"), "--port", str(PORT)],
                         cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 token = (ROOT / "token").read_text(encoding="utf-8").strip()
 

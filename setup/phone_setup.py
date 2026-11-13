@@ -24,7 +24,7 @@ TS = shutil.which("tailscale") or r"C:\Program Files\Tailscale\tailscale.exe"
 
 
 def ts(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([TS, *args], capture_output=True, text=True, timeout=60)
+    return subprocess.run([TS, *args], creationflags=0x08000000, capture_output=True, text=True, timeout=60)
 
 
 def main() -> int:

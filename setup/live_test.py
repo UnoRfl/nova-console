@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PORT = 8797
 env = dict(os.environ, NOVA_VOICE_VOLUME="0", NOVA_TEST="1", PYTHONIOENCODING="utf-8")
 env.pop("NOVA_CLAUDE_STUB", None)
-proc = subprocess.Popen([sys.executable, str(ROOT / "nova_bridge.py"), "--port", str(PORT)],
+proc = subprocess.Popen(creationflags=0x08000000, args=[sys.executable, str(ROOT / "nova_bridge.py"), "--port", str(PORT)],
                         cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 token = (ROOT / "token").read_text(encoding="utf-8").strip()
 
