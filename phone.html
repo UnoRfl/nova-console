@@ -2,321 +2,601 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#06030d">
 <title>Nova</title>
+<link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
-  /* The desk panel's glass, in a pocket: same void, same accent, same type. */
+  /* ==================================================================
+     NOVA, pocket edition. The desk panel's world -- violet void, frosted
+     glass with a hairline of light, the four-arm star in its tilted rings --
+     cut down to what a phone needs: the core, the conversation, one bar.
+     ================================================================== */
   @property --accent { syntax: "<color>"; inherits: true; initial-value: #c08cff; }
   :root {
-    --void:#06030d; --ink:#f1eafc; --ink-mid:#b6a6d2; --ink-dim:#7f6ea0;
-    --nova:#c08cff; --nova-mid:#8b46e8; --flare:#ff4fd8; --ok:#6ef2c0; --alert:#ff4d6d;
-    --line:rgba(192,140,255,.16); --line-bright:rgba(192,140,255,.34); --glass:rgba(24,14,44,.5);
+    --void:#06030d; --plate:#150c26;
+    --nova:#c08cff; --nova-mid:#8b46e8; --flare:#ff4fd8; --ok:#4dffc3; --alert:#ff4d6d;
+    --ink:#f1eafc; --ink-mid:#b6a6d2; --ink-dim:#7f6ea0;
+    --line:rgba(192,140,255,.14); --line-bright:rgba(192,140,255,.32);
+    --glass:rgba(24,14,44,.44); --glass-lift:rgba(46,28,82,.46);
     --sheen:linear-gradient(160deg, rgba(255,255,255,.085), rgba(255,255,255,.012) 38%, rgba(255,255,255,0) 60%);
-    --blur:blur(20px) saturate(150%); --ease:cubic-bezier(.22,.8,.24,1);
-    --display:"Sora","Segoe UI",system-ui,sans-serif; --body:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
-    --accent:#c08cff; transition:--accent .6s ease;
+    --blur:blur(22px) saturate(150%);
+    --shadow:0 18px 50px -18px rgba(0,0,0,.75), 0 0 0 1px rgba(255,255,255,.02) inset;
+    --ease:cubic-bezier(.22,.8,.24,1);
+    --display:"Sora","Segoe UI",system-ui,sans-serif;
+    --body:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --mono:"JetBrains Mono","Cascadia Mono",ui-monospace,Consolas,monospace;
+    --accent:#c08cff; transition:--accent .7s ease;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  html,body { height:100%; margin:0; background:var(--void); color:var(--ink); font:15.5px/1.5 var(--body); -webkit-font-smoothing:antialiased; }
-  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); overflow:hidden; }
+  html, body { height:100%; margin:0; }
+  body { background:var(--void); color:var(--ink); font:15px/1.5 var(--body); -webkit-font-smoothing:antialiased;
+         overflow:hidden; display:flex; flex-direction:column;
+         padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  button { font:inherit; color:inherit; }
+  .ico { width:19px; height:19px; flex:none; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+
+  /* ---------------------------------------------------------------- field */
   .field { position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden;
-           background:radial-gradient(120% 80% at 50% 20%, #140b28 0%, var(--void) 70%); }
-  .field i { position:absolute; border-radius:50%; filter:blur(70px); opacity:.5; will-change:transform; }
-  .field .a1 { width:90vmax; height:90vmax; left:-40vmax; top:-50vmax;
-               background:radial-gradient(circle, color-mix(in srgb, var(--accent) 45%, transparent), transparent 62%);
-               animation:d1 30s ease-in-out infinite alternate; }
-  .field .a2 { width:80vmax; height:80vmax; right:-45vmax; bottom:-45vmax;
-               background:radial-gradient(circle, rgba(139,70,232,.42), transparent 62%); animation:d2 36s ease-in-out infinite alternate; }
-  @keyframes d1 { to { transform:translate3d(14vmax,10vmax,0); } }
-  @keyframes d2 { to { transform:translate3d(-12vmax,-9vmax,0); } }
+           background:radial-gradient(130% 80% at 50% 26%, #120a24 0%, var(--void) 68%); }
+  .field i { position:absolute; border-radius:50%; filter:blur(80px); opacity:.5; will-change:transform; }
+  .field .a1 { width:95vmax; height:95vmax; left:-45vmax; top:-55vmax;
+               background:radial-gradient(circle, color-mix(in srgb, var(--accent) 46%, transparent), transparent 62%);
+               animation:drift1 38s ease-in-out infinite alternate; }
+  .field .a2 { width:85vmax; height:85vmax; right:-50vmax; bottom:-50vmax;
+               background:radial-gradient(circle, rgba(139,70,232,.42), transparent 62%); animation:drift2 46s ease-in-out infinite alternate; }
+  @keyframes drift1 { to { transform:translate3d(14vmax,9vmax,0) scale(1.12); } }
+  @keyframes drift2 { to { transform:translate3d(-12vmax,-8vmax,0) scale(1.08); } }
+  .field .grid { position:absolute; inset:0;
+    background:linear-gradient(rgba(192,140,255,.045) 1px, transparent 1px) 0 0 / 100% 36px,
+               linear-gradient(90deg, rgba(192,140,255,.045) 1px, transparent 1px) 0 0 / 36px 100%;
+    -webkit-mask-image:radial-gradient(80% 50% at 50% 30%, #000 10%, transparent 78%);
+            mask-image:radial-gradient(80% 50% at 50% 30%, #000 10%, transparent 78%); }
 
-  header, #log, footer { position:relative; z-index:1; }
-  header { padding:16px 18px 12px; display:flex; align-items:center; gap:10px; }
-  header b { font:300 19px var(--display); letter-spacing:.56em; text-shadow:0 0 22px color-mix(in srgb, var(--accent) 60%, transparent); }
-  .pill { display:inline-flex; align-items:center; gap:7px; height:30px; padding:0 12px; border-radius:999px;
-          border:1px solid var(--line); background:var(--sheen), var(--glass);
-          -webkit-backdrop-filter:var(--blur); backdrop-filter:var(--blur);
-          font:500 12px var(--body); color:var(--ink-mid); white-space:nowrap; }
-  #status { margin-left:auto; color:var(--accent); border-color:color-mix(in srgb, var(--accent) 38%, transparent); }
-  #status::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; box-shadow:0 0 9px currentColor; }
-  button.pill { cursor:pointer; color:var(--ink); }
-  button.pill[hidden] { display:none; }
+  .glass { background:var(--sheen), var(--glass); -webkit-backdrop-filter:var(--blur); backdrop-filter:var(--blur);
+           border:1px solid var(--line); box-shadow:var(--shadow); }
 
-  #log { flex:1; overflow-y:auto; padding:8px 16px 16px; display:flex; flex-direction:column; gap:10px; -webkit-overflow-scrolling:touch; }
-  .msg { max-width:86%; padding:11px 14px; border-radius:18px; white-space:pre-wrap; overflow-wrap:anywhere;
-         animation:in .32s var(--ease) both; }
-  @keyframes in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
-  .me { align-self:flex-end; background:linear-gradient(160deg, rgba(192,140,255,.3), rgba(139,70,232,.22));
-        border:1px solid var(--line-bright); border-bottom-right-radius:6px; }
-  .nova { align-self:flex-start; background:var(--sheen), var(--glass); border:1px solid var(--line);
-          -webkit-backdrop-filter:var(--blur); backdrop-filter:var(--blur); border-bottom-left-radius:6px;
-          color:color-mix(in srgb, var(--nova) 78%, #fff); }
-  .note { align-self:center; max-width:92%; font-size:12.5px; color:var(--ink-dim); text-align:center; background:none; padding:2px 8px; }
-  /* Something she said at the desk on her own while he was away from it. */
-  .notice { align-self:stretch; max-width:none; font-size:13.5px; color:#ffd9f5;
-            background:rgba(255,79,216,.07); border:1px solid rgba(255,79,216,.26); border-radius:14px; }
-  .notice small { display:block; font-size:11px; color:var(--ink-dim); margin-bottom:2px; letter-spacing:.06em; text-transform:uppercase; }
+  /* ---------------------------------------------------------------- top */
+  header { position:relative; z-index:3; display:flex; align-items:center; gap:8px; padding:14px 16px 6px; flex:none; }
+  .wordmark { font:300 18px var(--display); letter-spacing:.58em; margin:0 auto 0 2px;
+              text-shadow:0 0 24px color-mix(in srgb, var(--accent) 60%, transparent); }
+  .chip { display:inline-flex; align-items:center; gap:7px; height:32px; padding:0 12px; border-radius:999px;
+          font:500 12px var(--body); white-space:nowrap; color:var(--accent);
+          border:1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+          background:var(--sheen), var(--glass); -webkit-backdrop-filter:var(--blur); backdrop-filter:var(--blur);
+          box-shadow:0 0 22px -8px var(--accent); transition:border-color .6s, box-shadow .6s; }
+  .chip .dot { width:6px; height:6px; border-radius:50%; background:currentColor; box-shadow:0 0 9px currentColor; }
+  .chip.pulse .dot { animation:breathe 1.5s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity:.35; transform:scale(.8); } }
+  .iconbtn { width:36px; height:36px; border-radius:50%; display:grid; place-items:center; cursor:pointer; color:var(--ink-mid);
+             padding:0; transition:color .2s, border-color .2s, transform .2s var(--ease); }
+  .iconbtn:active { transform:scale(.92); }
+  .iconbtn[hidden] { display:none; }
+  #callBtn { color:var(--ok); border-color:rgba(77,255,195,.26); }
 
-  footer { padding:10px 14px 14px; }
-  .bar { display:flex; gap:6px; align-items:center; padding:6px; border-radius:999px; border:1px solid var(--line);
-         background:var(--sheen), var(--glass); -webkit-backdrop-filter:var(--blur); backdrop-filter:var(--blur);
-         box-shadow:0 18px 50px -18px rgba(0,0,0,.75); transition:border-color .3s, box-shadow .3s; }
-  .bar:focus-within { border-color:color-mix(in srgb, var(--accent) 55%, transparent); box-shadow:0 0 30px -12px var(--accent); }
-  input { flex:1; min-width:0; padding:10px 6px; border:0; outline:none; background:transparent; color:var(--ink); font:inherit; }
-  input::placeholder { color:var(--ink-dim); }
-  .round { border:0; border-radius:50%; width:46px; height:46px; flex:none; display:grid; place-items:center; cursor:pointer;
-           background:rgba(192,140,255,.12); color:var(--ink); transition:transform .2s var(--ease), background .25s; }
+  /* ---------------------------------------------------------------- stage */
+  main { position:relative; z-index:1; flex:1; min-height:0; display:flex; flex-direction:column; }
+  .stage { flex:none; display:grid; place-items:center; height:min(78vw, 46vh); transition:height .55s var(--ease); }
+  /* Nothing said yet: the core sits in the middle of the screen, as on the desk. */
+  body:not(.talking) main { justify-content:center; padding-bottom:9vh; }
+  body:not(.talking) #log { flex:none; }
+  .stage canvas { width:min(78vw, 46vh); height:min(78vw, 46vh); transition:width .55s var(--ease), height .55s var(--ease); }
+  body.talking .stage { height:96px; }
+  body.talking .stage canvas { width:96px; height:96px; }
+  .readout { text-align:center; font:400 11px var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--ink-dim);
+             margin-top:-4px; min-height:16px; font-variant-numeric:tabular-nums; }
+  body.talking .readout { display:none; }
+
+  #log { flex:1; min-height:0; overflow-y:auto; padding:6px 16px 14px; display:flex; flex-direction:column; gap:12px;
+         -webkit-overflow-scrolling:touch; scrollbar-width:none;
+         -webkit-mask-image:linear-gradient(transparent, #000 18px); mask-image:linear-gradient(transparent, #000 18px); }
+  #log::-webkit-scrollbar { display:none; }
+  .msg { max-width:88%; animation:rise .4s var(--ease) both; }
+  @keyframes rise { from { opacity:0; transform:translateY(10px); } }
+  .msg .who { font:500 10px var(--mono); letter-spacing:.16em; text-transform:uppercase; color:var(--ink-dim); margin:0 4px 5px; }
+  .msg .body { padding:11px 14px; border-radius:18px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .me { align-self:flex-end; text-align:right; }
+  .me .body { text-align:left; border-bottom-right-radius:6px; border-color:var(--line-bright);
+              background:linear-gradient(160deg, rgba(192,140,255,.26), rgba(139,70,232,.16)); }
+  .nova { align-self:flex-start; }
+  .nova .body { border-bottom-left-radius:6px; color:color-mix(in srgb, var(--nova) 30%, var(--ink)); }
+  .nova .who { color:var(--accent); }
+  .nova.wait .body { color:var(--ink-dim); }
+  .notice { align-self:stretch; max-width:none; }
+  .notice .body { border-color:rgba(255,79,216,.28); background:var(--sheen), rgba(255,79,216,.07); color:#ffd9f5; font-size:14px; }
+  .notice .who { color:#ff9be6; }
+  .sys { align-self:center; font:400 11px var(--mono); letter-spacing:.08em; color:var(--ink-dim); text-align:center; padding:2px 10px; }
+
+  /* ---------------------------------------------------------------- command bar */
+  footer { position:relative; z-index:3; flex:none; padding:8px 14px 14px; }
+  .bar { display:flex; align-items:center; gap:6px; padding:6px; border-radius:999px; transition:border-color .3s, box-shadow .3s; }
+  .bar:focus-within { border-color:color-mix(in srgb, var(--accent) 50%, transparent); box-shadow:0 0 34px -12px var(--accent), var(--shadow); }
+  #text { flex:1; min-width:0; border:0; outline:none; background:transparent; color:var(--ink); font:15px var(--body); padding:10px 6px; }
+  #text::placeholder { color:var(--ink-dim); }
+  .round { width:44px; height:44px; flex:none; border:0; border-radius:50%; display:grid; place-items:center; cursor:pointer;
+           background:rgba(192,140,255,.10); color:var(--ink-mid); transition:transform .2s var(--ease), background .25s, color .25s; }
   .round:active { transform:scale(.92); }
-  .round svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
   #send { background:var(--nova); color:var(--void); box-shadow:0 0 22px -6px var(--nova); }
-  #talk.rec { background:var(--ok); color:var(--void); box-shadow:0 0 26px -4px var(--ok); animation:pulse 1s ease-in-out infinite; }
+  #talk.rec { background:var(--ok); color:var(--void); box-shadow:0 0 26px -4px var(--ok); }
   button:disabled { opacity:.45; }
-  @keyframes pulse { 50% { transform:scale(1.1); } }
 
-  #screen { position:fixed; inset:0; z-index:5; background:rgba(5,2,12,.8); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
-            display:none; flex-direction:column; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
-  #screen.on { display:flex; animation:in .28s var(--ease) both; }
-  #screen .top { display:flex; gap:8px; padding:14px 16px; align-items:center; }
-  #screen .top span { flex:1; color:var(--ink-dim); font-size:13px; }
-  #screen .view { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; }
-  #screen img { width:100%; display:block; }
-  /* Live call: a hands-free conversation. She listens for him, answers aloud in her own voice. */
-  #callBtn { background:rgba(110,242,192,.14); color:var(--ok); }
-  #call { position:fixed; inset:0; z-index:6; display:none; flex-direction:column; align-items:center; justify-content:center; gap:26px;
-          padding:env(safe-area-inset-top) 24px env(safe-area-inset-bottom); text-align:center;
-          background:radial-gradient(110% 70% at 50% 40%, #1a0e33 0%, rgba(6,3,13,.97) 70%); }
-  #call.on { display:flex; animation:in .3s var(--ease) both; }
-  #call .who { font:300 22px var(--display); letter-spacing:.5em; padding-left:.5em; }
-  #callState { font:500 13px var(--body); color:var(--accent); letter-spacing:.08em; text-transform:uppercase; min-height:20px; }
-  #callHeard { min-height:44px; max-width:520px; color:var(--ink-mid); font-size:14.5px; }
-  .core { width:150px; height:150px; border-radius:50%; position:relative; border:0; padding:0; cursor:pointer;
-          background:radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--accent) 80%, #fff) 0%, var(--accent) 32%, transparent 70%);
-          box-shadow:0 0 70px -10px var(--accent); transform:scale(calc(.9 + var(--lvl, 0) * .5)); transition:transform .08s linear; }
-  .core::after { content:""; position:absolute; inset:-18px; border-radius:50%; border:1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-                 animation:ring 2.4s ease-out infinite; }
-  @keyframes ring { from { transform:scale(.8); opacity:.9; } to { transform:scale(1.35); opacity:0; } }
-  .callbtns { display:flex; gap:22px; }
-  .bigbtn { width:68px; height:68px; border-radius:50%; border:0; display:grid; place-items:center; cursor:pointer; color:#fff; }
-  .bigbtn svg { width:28px; height:28px; fill:none; stroke:currentColor; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
-  .bigbtn[hidden] { display:none; }
-  #answer { background:#22c58b; box-shadow:0 0 34px -6px #22c58b; }
-  #hangup { background:#ff4d6d; box-shadow:0 0 34px -6px #ff4d6d; }
-  #hangup svg { transform:rotate(135deg); }
+  /* ---------------------------------------------------------------- sheets */
+  .scrim { position:fixed; inset:0; z-index:8; background:rgba(4,2,10,.55); opacity:0; pointer-events:none; transition:opacity .3s; }
+  .scrim.on { opacity:1; pointer-events:auto; }
+  .sheet { position:fixed; left:10px; right:10px; bottom:calc(10px + env(safe-area-inset-bottom)); z-index:9; border-radius:24px;
+           padding:8px; transform:translateY(120%); transition:transform .42s var(--ease); }
+  .sheet.on { transform:none; }
+  .sheet .grab { width:36px; height:4px; border-radius:4px; background:var(--line-bright); margin:4px auto 8px; }
+  .row { display:flex; align-items:center; gap:12px; width:100%; padding:13px 14px; border:0; border-radius:16px; background:transparent;
+         text-align:left; cursor:pointer; color:var(--ink); }
+  .row:active { background:rgba(192,140,255,.08); }
+  .row .ico { color:var(--accent); }
+  .row small { display:block; color:var(--ink-dim); font-size:12px; }
+  .row[hidden] { display:none; }
+  .access { margin:4px 14px 10px; font:500 10.5px var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--ink-dim); }
+  .access b { color:#ff9be6; font-weight:500; }
+
+  #screen { position:fixed; inset:0; z-index:10; display:none; flex-direction:column; background:rgba(6,3,13,.86);
+            -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px); padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  #screen.on { display:flex; animation:rise .3s var(--ease) both; }
+  #screen .top { display:flex; align-items:center; gap:8px; padding:14px 16px; }
+  #screen .top span { flex:1; font:400 11px var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--ink-dim); }
+  #screen .view { flex:1; overflow:auto; padding:0 10px 10px; }
+  #screen img { width:100%; display:block; border-radius:14px; border:1px solid var(--line); }
+
+  /* ---------------------------------------------------------------- call */
+  #call { position:fixed; inset:0; z-index:12; display:none; flex-direction:column; align-items:center;
+          padding:calc(env(safe-area-inset-top) + 40px) 24px calc(env(safe-area-inset-bottom) + 34px); text-align:center; }
+  #call.on { display:flex; animation:rise .35s var(--ease) both; }
+  #call .field { position:absolute; }
+  #call > *:not(.field) { position:relative; z-index:1; }
+  #call .label { font:500 11px var(--mono); letter-spacing:.22em; text-transform:uppercase; color:var(--ink-dim); }
+  #call h2 { font:300 30px var(--display); letter-spacing:.56em; padding-left:.56em; margin:10px 0 2px;
+             text-shadow:0 0 30px color-mix(in srgb, var(--accent) 65%, transparent); }
+  #callTime { font:400 13px var(--mono); color:var(--accent); letter-spacing:.1em; font-variant-numeric:tabular-nums; min-height:20px; }
+  #callCore { width:min(86vw, 52vh); height:min(86vw, 52vh); margin:auto 0; cursor:pointer; }
+  #callHeard { min-height:46px; max-width:480px; color:var(--ink-mid); font-size:14.5px; margin-bottom:26px; }
+  .callbtns { display:flex; gap:34px; align-items:flex-start; }
+  .cbtn { display:flex; flex-direction:column; align-items:center; gap:9px; font:500 10.5px var(--mono); letter-spacing:.14em;
+          text-transform:uppercase; color:var(--ink-dim); background:none; border:0; cursor:pointer; padding:0; }
+  .cbtn[hidden] { display:none; }
+  .cbtn span { width:66px; height:66px; border-radius:50%; display:grid; place-items:center; transition:transform .2s var(--ease), background .25s; }
+  .cbtn:active span { transform:scale(.92); }
+  .cbtn .ico { width:26px; height:26px; }
+  .cbtn b { font-weight:500; }
+  #muteBtn span { color:var(--ink); }
+  #muteBtn.on span { background:var(--ink); color:var(--void); }
+  #answer span { background:rgba(77,255,195,.16); border:1px solid rgba(77,255,195,.5); color:var(--ok); box-shadow:0 0 36px -8px var(--ok); }
+  #answer.ring span { animation:ringing 1.6s ease-in-out infinite; }
+  @keyframes ringing { 0%,60%,100% { transform:none; } 10%,30% { transform:rotate(-12deg); } 20%,40% { transform:rotate(12deg); } }
+  #hangup span { background:rgba(255,77,109,.18); border:1px solid rgba(255,77,109,.55); color:var(--alert); box-shadow:0 0 36px -8px var(--alert); }
+  #hangup .ico { transform:rotate(135deg); }
   @media (prefers-reduced-motion: reduce) { *, *::before { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
-<div class="field"><i class="a1"></i><i class="a2"></i></div>
-<header><b>NOVA</b><span class="pill" id="status">connecting</span>
-  <button class="pill" id="alertBtn" hidden>Alerts</button><button class="pill" id="screenBtn" hidden>Screen</button>
-  <button class="pill" id="callBtn" hidden>Call</button></header>
-<div id="call" role="dialog" aria-label="Call with Nova">
-  <div class="who">NOVA</div>
-  <button class="core" id="callCore" aria-label="Tap to interrupt her"></button>
-  <div id="callState">incoming call</div>
-  <div id="callHeard"></div>
-  <div class="callbtns">
-    <button class="bigbtn" id="answer" aria-label="Answer"><svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg></button>
-    <button class="bigbtn" id="hangup" aria-label="Hang up"><svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg></button>
-  </div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+  <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 21h4"/></symbol>
+  <symbol id="i-micoff" viewBox="0 0 24 24"><path d="M15 9.5V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.6 2.5M5 11a7 7 0 0 0 11.3 5.5M19 11a7 7 0 0 1-.6 2.8M12 18v3M3 3l18 18"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+</svg>
+<div class="field"><i class="a1"></i><i class="a2"></i><div class="grid"></div></div>
+
+<header>
+  <h1 class="wordmark">NOVA</h1>
+  <span class="chip" id="status"><span class="dot"></span><span id="statusText">Connecting</span></span>
+  <button class="iconbtn glass" id="callBtn" aria-label="Call Nova" hidden><svg class="ico"><use href="#i-phone"/></svg></button>
+  <button class="iconbtn glass" id="moreBtn" aria-label="More"><svg class="ico"><use href="#i-more"/></svg></button>
+</header>
+
+<main>
+  <div class="stage"><canvas id="core" aria-hidden="true"></canvas></div>
+  <div class="readout" id="readout"></div>
+  <div id="log" aria-live="polite"></div>
+</main>
+
+<footer><div class="bar glass">
+  <button class="round" id="talk" aria-label="Hold to talk"><svg class="ico"><use href="#i-mic"/></svg></button>
+  <input id="text" placeholder="Ask Nova anything" autocomplete="off" enterkeyhint="send">
+  <button class="round" id="send" aria-label="Send"><svg class="ico"><use href="#i-send"/></svg></button>
+</div></footer>
+
+<div class="scrim" id="scrim"></div>
+<div class="sheet glass" id="sheet" role="dialog" aria-label="More">
+  <div class="grab"></div>
+  <div class="access" id="access">Checking access</div>
+  <button class="row" id="rowCall" hidden><svg class="ico"><use href="#i-phone"/></svg><div>Call Nova<small>Hands-free, in her own voice</small></div></button>
+  <button class="row" id="rowScreen" hidden><svg class="ico"><use href="#i-screen"/></svg><div>PC screen<small>A look at the desk right now</small></div></button>
+  <button class="row" id="rowAlerts" hidden><svg class="ico"><use href="#i-bell"/></svg><div>Alerts<small>Notify this phone while the page is open</small></div></button>
 </div>
-<div id="log">
-  <div class="note" id="modeNote">Checking what this phone may do…</div>
-</div>
+
 <div id="screen" role="dialog" aria-label="PC screen">
   <div class="top"><span id="shotTime">PC screen</span>
-    <button class="pill" id="shotRefresh">Refresh</button><button class="pill" id="shotClose">Close</button></div>
+    <button class="iconbtn glass" id="shotRefresh" aria-label="Refresh"><svg class="ico"><use href="#i-refresh"/></svg></button>
+    <button class="iconbtn glass" id="shotClose" aria-label="Close"><svg class="ico"><use href="#i-x"/></svg></button></div>
   <div class="view"><img id="shot" alt="The PC screen"></div>
 </div>
-<footer><div class="bar">
-  <button class="round" id="talk" aria-label="Hold to talk"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
-  <input id="text" placeholder="Ask Nova" autocomplete="off" enterkeyhint="send">
-  <button class="round" id="send" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
-</div></footer>
+
+<div id="call" role="dialog" aria-label="Call with Nova">
+  <div class="field"><i class="a1"></i><i class="a2"></i><div class="grid"></div></div>
+  <div class="label" id="callLabel">Incoming call</div>
+  <h2>NOVA</h2>
+  <div id="callTime"></div>
+  <canvas id="callCore" aria-label="Tap to cut in while she speaks"></canvas>
+  <div id="callHeard"></div>
+  <div class="callbtns">
+    <button class="cbtn" id="muteBtn" hidden><span class="glass"><svg class="ico"><use href="#i-micoff"/></svg></span>Mute</button>
+    <button class="cbtn" id="hangup"><span><svg class="ico"><use href="#i-phone"/></svg></span><b id="hangLabel">Decline</b></button>
+    <button class="cbtn ring" id="answer"><span><svg class="ico"><use href="#i-phone"/></svg></span>Answer</button>
+  </div>
+</div>
+
 <script>
   const TOKEN = "__NOVA_TOKEN__";
   const $ = (id) => document.getElementById(id);
-  const log = $("log"), text = $("text"), talk = $("talk"), send = $("send"), status = $("status");
+  const log = $("log"), text = $("text"), talk = $("talk"), send = $("send");
   const root = document.documentElement;
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   let busy = false, owner = false;
 
-  function tint(c) { root.style.setProperty("--accent", c); }
-
-  function add(cls, body) {
-    const d = document.createElement("div");
-    d.className = "msg " + cls;
-    d.textContent = body;
-    log.appendChild(d);
-    log.scrollTop = log.scrollHeight;
-    return d;
+  // ------------------------------------------------------------ state
+  // Same states, colours and labels as the desk panel.
+  const STATES = {
+    idle:        { accent:"#c08cff", spin:1.0, rings:4, label:"Ready" },
+    listening:   { accent:"#4dffc3", spin:1.6, rings:5, label:"Listening" },
+    transcribing:{ accent:"#4dd2ff", spin:2.6, rings:5, label:"Transcribing" },
+    thinking:    { accent:"#ff4fd8", spin:3.4, rings:5, label:"Thinking" },
+    speaking:    { accent:"#e6ccff", spin:1.3, rings:4, label:"Speaking" },
+    ringing:     { accent:"#4dffc3", spin:2.2, rings:5, label:"Incoming" },
+    offline:     { accent:"#ff4d6d", spin:0.6, rings:3, label:"Offline" }
+  };
+  const S = { mode:"", amp:0, speakEnv:0 };          // "" so the first setMode always applies
+  function setMode(m) {
+    if (S.mode === m) return;
+    S.mode = m;
+    const st = STATES[m] || STATES.idle;
+    root.style.setProperty("--accent", st.accent);
+    $("statusText").textContent = st.label;
+    $("status").classList.toggle("pulse", m !== "idle" && m !== "offline");
+    cores.forEach(c => c.surge = 1);
   }
 
+  // ------------------------------------------------------------ the core
+  // Ported from the desk panel: four arms, diffraction spikes, motes, and
+  // five tilted rings that alternate direction. Every quantity eases.
+  const RINGS = [
+    { r:0.97, w:1,   speed:-0.06, ticks:72, tickLen:0.030, alpha:0.28 },
+    { r:0.88, w:1.5, speed: 0.14, ticks:24, tickLen:0.055, alpha:0.52 },
+    { r:0.76, w:1,   speed:-0.22, ticks:12, tickLen:0.040, alpha:0.38 },
+    { r:0.63, w:2,   speed: 0.34, ticks:6,  tickLen:0.075, alpha:0.78 },
+    { r:0.52, w:1,   speed:-0.48, ticks:36, tickLen:0.045, alpha:0.42 }
+  ];
+  const ORBIT = 0.20, MID = "#8b46e8";
+  const hexRgb = h => [1,3,5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const rgbHex = c => "#" + c.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+
+  function makeCore(cv) {
+    const g = cv.getContext("2d");
+    const k = { cv, g, side:200, rgb:[192,140,255], spin:1, surge:0, burst:0, last:0,
+                phase:RINGS.map((_, i) => i * 1.7), ring:RINGS.map(() => 1), angle:RINGS.map(() => 0),
+                motes:Array.from({ length:26 }, () => ({ a:Math.random()*6.28, life:Math.random(), rate:6e-5 + Math.random()*1.2e-4, size:.6 + Math.random()*1.4 })) };
+    k.size = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2), box = cv.getBoundingClientRect();
+      k.side = Math.max(40, Math.min(box.width, box.height) || 200);
+      cv.width = Math.round(k.side * dpr); cv.height = Math.round(k.side * dpr);
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    k.size();
+    if (window.ResizeObserver) new ResizeObserver(k.size).observe(cv);
+    return k;
+  }
+  const cores = [makeCore($("core")), makeCore($("callCore"))];
+
+  function drawCore(k, t) {
+    if (!k.cv.offsetParent && k.cv.id === "callCore") { k.last = t; return; }   // call screen closed
+    const g = k.g, Sd = k.side, c = Sd / 2, R = (Sd / 2) * 0.84, small = Sd < 140;
+    g.clearRect(0, 0, Sd, Sd); g.lineCap = "round";
+    const look = STATES[S.mode] || STATES.idle;
+    const dt = Math.max(1, Math.min(80, t - (k.last || t))); k.last = t;
+    const ease = reduceMotion ? 1 : 1 - Math.exp(-dt / 190);
+    let drive;
+    if (S.mode === "listening") drive = S.amp > 0.01 ? Math.min(1, S.amp) : 0.34 + 0.22 * Math.sin(t * 0.009);
+    else if (S.mode === "speaking") drive = S.speakEnv;
+    else if (S.mode === "transcribing") drive = 0.34 + 0.20 * Math.sin(t * 0.011);
+    else if (S.mode === "thinking") drive = 0.30 + 0.16 * Math.sin(t * 0.006);
+    else if (S.mode === "ringing") drive = 0.4 + 0.3 * Math.max(0, Math.sin(t * 0.008));
+    else drive = 0.10 + 0.045 * Math.sin(t * 0.0013);
+    const want = hexRgb(look.accent);
+    for (let i = 0; i < 3; i++) k.rgb[i] += (want[i] - k.rgb[i]) * ease;
+    k.spin += (look.spin - k.spin) * ease;
+    const accent = rgbHex(k.rgb);
+    k.surge *= reduceMotion ? 0 : Math.exp(-dt / 430);
+    const rush = 1 + k.surge * 2.4;
+
+    for (let i = 0; i < RINGS.length; i++) {
+      const ring = RINGS[i];
+      k.ring[i] += ((i < look.rings ? 1 : 0) - k.ring[i]) * ease;
+      if (!reduceMotion) k.angle[i] += ring.speed * k.spin * rush * dt * 0.0011;
+      const present = k.ring[i];
+      if (present < 0.015 || (small && i === 0)) continue;
+      const rr = R * ring.r * (1 + drive * 0.03);
+      const squash = reduceMotion ? 1 : 1 - ORBIT * (0.5 + 0.5 * Math.sin(t * 0.00026 + k.phase[i]));
+      g.save(); g.translate(c, c); g.scale(1, squash); g.rotate(k.angle[i]);
+      g.beginPath(); g.arc(0, 0, rr, 0, Math.PI * 2);
+      g.strokeStyle = accent; g.globalAlpha = ring.alpha * (0.5 + drive * 0.5) * present; g.lineWidth = ring.w; g.stroke();
+      if (!small) {
+        g.globalAlpha = ring.alpha * 0.85 * present; g.lineWidth = 1; g.beginPath();
+        const inner = rr * (1 - ring.tickLen);
+        for (let q = 0; q < ring.ticks; q++) { const a = q / ring.ticks * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+          g.moveTo(ca * inner, sa * inner); g.lineTo(ca * rr, sa * rr); }
+        g.stroke();
+      }
+      const sweep = Math.PI * (0.34 + k.surge * 0.5), dir = ring.speed < 0 ? -1 : 1, SEG = 7;
+      g.lineWidth = ring.w + 1.2;
+      for (let s = 0; s < SEG; s++) {
+        const a0 = dir > 0 ? s / SEG * sweep : sweep - (s + 1) / SEG * sweep, a1 = a0 + sweep / SEG + 0.01;
+        const kk = dir > 0 ? (s + 1) / SEG : 1 - s / SEG;
+        g.globalAlpha = present * (0.10 + 0.90 * kk * kk); g.beginPath(); g.arc(0, 0, rr, a0, a1); g.stroke();
+      }
+      const head = dir > 0 ? sweep : 0, hx = Math.cos(head) * rr, hy = Math.sin(head) * rr, mr = 4 + ring.w * 2;
+      const mote = g.createRadialGradient(hx, hy, 0, hx, hy, mr);
+      mote.addColorStop(0, "#ffffff"); mote.addColorStop(0.35, accent); mote.addColorStop(1, "rgba(0,0,0,0)");
+      g.globalAlpha = present * (0.55 + drive * 0.45); g.fillStyle = mote; g.beginPath(); g.arc(hx, hy, mr, 0, Math.PI * 2); g.fill();
+      g.restore();
+    }
+
+    const coreR = R * 0.34 * (1 + drive * 0.18);
+    g.save(); g.translate(c, c); g.globalCompositeOperation = "lighter";
+    const halo = g.createRadialGradient(0, 0, coreR * 0.6, 0, 0, Sd / 2 * 0.99);
+    halo.addColorStop(0, accent + "38"); halo.addColorStop(0.5, MID + "14"); halo.addColorStop(1, "rgba(0,0,0,0)");
+    g.globalAlpha = 0.55 + drive * 0.45; g.fillStyle = halo; g.beginPath(); g.arc(0, 0, Sd / 2 * 0.99, 0, Math.PI * 2); g.fill();
+    const bloom = g.createRadialGradient(0, 0, 0, 0, 0, coreR * 2.4);
+    bloom.addColorStop(0, accent); bloom.addColorStop(0.2, accent + "cc"); bloom.addColorStop(0.55, MID + "40"); bloom.addColorStop(1, "rgba(0,0,0,0)");
+    g.globalAlpha = 0.5 + drive * 0.5; g.fillStyle = bloom; g.beginPath(); g.arc(0, 0, coreR * 2.4, 0, Math.PI * 2); g.fill();
+    if (!reduceMotion && !small) {
+      k.motes.forEach((m, i) => {
+        m.life += dt * m.rate * (0.6 + drive * 1.6 + k.surge * 2);
+        if (m.life >= 1) { m.life = 0; m.a = Math.random() * 6.28; }
+        const rr = coreR * 0.5 + (R * 0.98 - coreR * 0.5) * m.life, aa = m.a + m.life * 1.3 + k.burst * 0.5;
+        g.globalAlpha = Math.sin(m.life * Math.PI) * (0.55 + 0.45 * Math.sin(t * 0.006 + i * 2.1)) * 0.85;
+        g.fillStyle = i % 4 === 0 ? "#ffffff" : accent;
+        g.beginPath(); g.arc(Math.cos(aa) * rr, Math.sin(aa) * rr, m.size, 0, Math.PI * 2); g.fill();
+      });
+    }
+    if (!reduceMotion) k.burst -= k.spin * rush * dt * 0.00028;
+    g.save(); g.rotate(k.burst);
+    for (let i = 0; i < 4; i++) {
+      const long = i % 2 === 0, len = R * (long ? 0.98 : 0.6) * (0.72 + drive * 0.4 + k.surge * 0.2);
+      const sp = g.createLinearGradient(0, 0, len, 0);
+      sp.addColorStop(0, "#ffffff"); sp.addColorStop(0.3, accent + "aa"); sp.addColorStop(1, "rgba(0,0,0,0)");
+      g.strokeStyle = sp; g.lineWidth = long ? 1.3 : 1; g.globalAlpha = long ? 0.75 : 0.5;
+      g.beginPath(); g.moveTo(0, 0); g.lineTo(len, 0); g.stroke(); g.rotate(Math.PI / 2);
+    }
+    g.restore();
+    g.save(); g.rotate(k.burst); g.globalAlpha = 1;
+    const arm = coreR * 1.5;
+    for (let i = 0; i < 4; i++) {
+      const a = i / 4 * Math.PI * 2, long = i % 2 === 0, len = arm * (long ? 1 : 0.52) * (1 + drive * 0.55), hw = arm * (long ? 0.13 : 0.085);
+      g.save(); g.rotate(a);
+      const gr = g.createLinearGradient(0, 0, len, 0);
+      gr.addColorStop(0, "#ffffff"); gr.addColorStop(0.25, accent); gr.addColorStop(1, "rgba(0,0,0,0)");
+      g.fillStyle = gr; g.globalAlpha = long ? 0.95 : 0.6;
+      g.beginPath(); g.moveTo(0, -hw); g.lineTo(len, 0); g.lineTo(0, hw); g.closePath(); g.fill(); g.restore();
+    }
+    g.restore();
+    const heart = g.createRadialGradient(0, 0, 0, 0, 0, coreR * 0.42);
+    heart.addColorStop(0, "#ffffff"); heart.addColorStop(0.6, accent); heart.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = heart; g.globalAlpha = 0.85 + drive * 0.15; g.beginPath(); g.arc(0, 0, coreR * 0.42, 0, Math.PI * 2); g.fill();
+    g.restore();
+
+    // Her voice, as the desk draws it: a ring of soft bars outside the rings.
+    if (S.mode === "speaking" && !small) {
+      g.save(); g.translate(c, c); g.strokeStyle = accent; g.lineWidth = 2; g.beginPath();
+      for (let i = 0; i < 72; i++) {
+        const v = S.speakEnv * (0.3 + 0.7 * Math.abs(Math.sin(i * 0.61 + t * 0.011) * Math.cos(i * 0.17 - t * 0.004)));
+        if (v < 0.03) continue;
+        const a = i / 72 * Math.PI * 2 - Math.PI / 2, r0 = R * 1.03, r1 = r0 + v * R * 0.13;
+        g.moveTo(Math.cos(a) * r0, Math.sin(a) * r0); g.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+      }
+      g.globalAlpha = 0.35 + S.speakEnv * 0.5; g.stroke(); g.restore();
+    }
+  }
+
+  // Her voice level comes from the audio element actually playing.
+  const player = new Audio();
+  let voiceAn = null, voiceBuf = null, actx = null;
+  function hookVoice() {
+    if (voiceAn) return;
+    try {
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      const src = actx.createMediaElementSource(player);
+      voiceAn = actx.createAnalyser(); voiceAn.fftSize = 512; voiceBuf = new Float32Array(512);
+      src.connect(voiceAn); voiceAn.connect(actx.destination);
+    } catch (e) { voiceAn = null; }
+  }
+  function frame(t) {
+    if (S.mode === "speaking") {
+      let lvl = 0.35 + 0.25 * Math.sin(t * 0.013);
+      if (voiceAn) { voiceAn.getFloatTimeDomainData(voiceBuf); let s = 0; for (const v of voiceBuf) s += v * v; lvl = Math.min(1, Math.sqrt(s / voiceBuf.length) * 6); }
+      S.speakEnv += (lvl - S.speakEnv) * 0.3;
+    } else S.speakEnv *= 0.85;
+    cores.forEach(k => drawCore(k, t));
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ------------------------------------------------------------ chat
+  function stamp() { return new Date().toLocaleTimeString([], { hour:"numeric", minute:"2-digit" }); }
+  function add(kind, body, who) {
+    document.body.classList.add("talking");
+    const d = document.createElement("div");
+    d.className = "msg " + kind;
+    if (kind === "sys") { d.textContent = body; log.appendChild(d); log.scrollTop = log.scrollHeight; return d; }
+    const w = document.createElement("div"); w.className = "who";
+    w.textContent = (who || (kind === "me" ? "Sir" : "Nova")) + " · " + stamp();
+    const b = document.createElement("div"); b.className = "body glass"; b.textContent = body;
+    d.append(w, b); log.appendChild(d); log.scrollTop = log.scrollHeight;
+    return b;
+  }
   async function api(path, options) {
-    const o = Object.assign({ headers: {} }, options || {});
+    const o = Object.assign({ headers:{} }, options || {});
     o.headers["X-Nova-Token"] = TOKEN;
     const r = await fetch(path, o);
     return r.json();
   }
+  const tidy = (s) => (s || "").replace(/::(CAD|MODEL|HOLO|BUILD)[\s\S]*$/, "").trim();
 
-  function speak(t) {
-    if (!window.speechSynthesis) return;
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(t);
-    const v = speechSynthesis.getVoices().find(v => /en-GB/i.test(v.lang) && /female|libby|sonia|serena|kate|martha/i.test(v.name))
-           || speechSynthesis.getVoices().find(v => /^en/i.test(v.lang));
-    if (v) u.voice = v;
-    speechSynthesis.speak(u);
+  // Her own voice (the PC's), the browser's as a fallback.
+  async function voice(t) {
+    setMode("speaking");
+    try {
+      const r = await fetch("/api/tts", { method:"POST", headers:{ "X-Nova-Token":TOKEN, "Content-Type":"application/json" }, body:JSON.stringify({ text:t }) });
+      if (!r.ok) throw new Error("tts " + r.status);
+      hookVoice(); if (actx && actx.state === "suspended") actx.resume();
+      const url = URL.createObjectURL(await r.blob());
+      player.src = url;
+      await new Promise(done => { player.onended = player.onerror = done; player.play().catch(done); });
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      if (window.speechSynthesis) await new Promise(done => { const u = new SpeechSynthesisUtterance(t); u.onend = u.onerror = done; speechSynthesis.speak(u); });
+    }
   }
 
-  async function ask(prompt) {
+  async function ask(prompt, spoken) {
     prompt = prompt.trim();
     if (!prompt || busy) return;
     busy = true; send.disabled = talk.disabled = true;
     add("me", prompt);
-    const bubble = add("nova", "…");
-    status.textContent = "thinking"; tint("#ff4fd8");
+    const bubble = add("nova", "…"); bubble.parentNode.classList.add("wait");
+    setMode("thinking");
+    let answer = "";
     try {
-      const r = await api("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: prompt, channel: "phone" }) });
-      const answer = r.error ? (r.detail || "Something went wrong.") : (r.text || "(no reply)");
-      bubble.textContent = answer.replace(/::(CAD|MODEL|HOLO|BUILD)[\s\S]*$/, "").trim() || answer;
-      if (!r.error) speak(bubble.textContent);
-    } catch (e) {
-      bubble.textContent = "I could not reach the PC.";
-    }
-    status.textContent = "ready"; tint("#c08cff");
+      const r = await api("/api/ask", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ prompt, channel:"phone" }) });
+      answer = r.error ? (r.detail || "Something went wrong, Sir.") : (tidy(r.text) || "Done, Sir.");
+    } catch (e) { answer = "I could not reach the PC, Sir."; }
+    bubble.textContent = answer; bubble.parentNode.classList.remove("wait");
+    log.scrollTop = log.scrollHeight;
+    if (spoken) await voice(answer);
+    setMode("idle");
     busy = false; send.disabled = talk.disabled = false;
   }
+  send.addEventListener("click", () => { const v = text.value; text.value = ""; ask(v, false); });
+  text.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); send.click(); } });
 
-  send.addEventListener("click", () => { const v = text.value; text.value = ""; ask(v); });
-  text.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); send.click(); } });
-
-  // Hold to talk: record, transcribe on the PC with Whisper, then ask.
-  let rec = null, chunks = [];
+  // Hold to talk: Whisper on the PC; a spoken question gets a spoken answer.
+  let rec = null, chunks = [], micAn = null, micTimer = 0;
   async function startRec() {
     if (busy || rec) return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      chunks = [];
-      rec = new MediaRecorder(stream);
-      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true } });
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      micAn = actx.createAnalyser(); micAn.fftSize = 512; actx.createMediaStreamSource(stream).connect(micAn);
+      const buf = new Float32Array(512);
+      micTimer = setInterval(() => { micAn.getFloatTimeDomainData(buf); let s = 0; for (const v of buf) s += v * v; S.amp = Math.sqrt(s / 512) * 7; }, 60);
+      chunks = []; rec = new MediaRecorder(stream);
+      rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
       rec.onstop = async () => {
+        clearInterval(micTimer); S.amp = 0;
         stream.getTracks().forEach(t => t.stop());
         talk.classList.remove("rec");
-        const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
-        rec = null;
-        if (blob.size < 2000) { status.textContent = "ready"; tint("#c08cff"); return; }
-        status.textContent = "transcribing"; tint("#4dd2ff");
+        const blob = new Blob(chunks, { type:rec.mimeType || "audio/webm" }); rec = null;
+        if (blob.size < 2000) { setMode("idle"); return; }
+        setMode("transcribing");
         try {
-          const r = await fetch("/api/transcribe", { method: "POST", headers: { "X-Nova-Token": TOKEN }, body: blob });
-          const out = await r.json();
-          status.textContent = "ready"; tint("#c08cff");
-          if (out.text) ask(out.text);
-        } catch (e) { status.textContent = "could not transcribe"; tint("#ff4d6d"); }
+          const out = await (await fetch("/api/transcribe", { method:"POST", headers:{ "X-Nova-Token":TOKEN }, body:blob })).json();
+          setMode("idle");
+          if (out.text) ask(out.text, true);
+        } catch (e) { setMode("idle"); add("sys", "Could not transcribe that"); }
       };
-      rec.start();
-      talk.classList.add("rec");
-      status.textContent = "listening"; tint("#4dffc3");
-    } catch (e) {
-      add("note", "The microphone is not available here. Type instead.");
-    }
+      rec.start(); talk.classList.add("rec"); setMode("listening");
+    } catch (e) { add("sys", "No microphone here. Type instead."); }
   }
   function stopRec() { if (rec && rec.state === "recording") rec.stop(); }
-  talk.addEventListener("pointerdown", (e) => { e.preventDefault(); startRec(); });
+  talk.addEventListener("pointerdown", e => { e.preventDefault(); startRec(); });
   talk.addEventListener("pointerup", stopRec);
   talk.addEventListener("pointerleave", stopRec);
-  talk.addEventListener("contextmenu", (e) => e.preventDefault());
+  talk.addEventListener("contextmenu", e => e.preventDefault());
 
-  // The PC screen, for Sir's own phone only (the bridge checks his Tailscale login).
+  // ------------------------------------------------------------ sheet + screen
+  const sheet = $("sheet"), scrim = $("scrim");
+  function sheetOn(on) { sheet.classList.toggle("on", on); scrim.classList.toggle("on", on); }
+  $("moreBtn").addEventListener("click", () => sheetOn(true));
+  scrim.addEventListener("click", () => sheetOn(false));
   const screenBox = $("screen"), shot = $("shot");
   function loadShot() {
-    $("shotTime").textContent = "loading…";
-    shot.onload = () => { $("shotTime").textContent = "PC screen · " + new Date().toLocaleTimeString(); };
-    shot.onerror = () => { $("shotTime").textContent = "could not load the screen"; };
+    $("shotTime").textContent = "Loading";
+    shot.onload = () => { $("shotTime").textContent = "PC screen · " + stamp(); };
+    shot.onerror = () => { $("shotTime").textContent = "Could not load the screen"; };
     shot.src = "/api/phone/screen?token=" + encodeURIComponent(TOKEN) + "&t=" + Date.now();
   }
-  $("screenBtn").addEventListener("click", () => { screenBox.classList.add("on"); loadShot(); });
+  $("rowScreen").addEventListener("click", () => { sheetOn(false); screenBox.classList.add("on"); loadShot(); });
   $("shotRefresh").addEventListener("click", loadShot);
   $("shotClose").addEventListener("click", () => screenBox.classList.remove("on"));
 
-  // Notices: what she said at the desk on her own (a job finishing, a server
-  // dropping, a reminder). Shown here while this page is open, and raised as
-  // a phone notification if he allowed that. A page that is fully closed
-  // gets nothing: the urgent ones also go to his Discord DMs for that.
+  // Notices: what she said at the desk on her own while this page is open.
   let seen = -1;
   const canNotify = "Notification" in window;
   async function pollNotices() {
     if (!owner) return;
     try {
       const r = await api("/api/notices?since=" + Math.max(0, seen));
-      const first = seen < 0;
-      seen = r.seq || 0;
-      if (first) return;                       // do not replay the day on opening
+      const first = seen < 0; seen = r.seq || 0;
+      if (first) return;
       for (const n of r.notices || []) {
-        const d = add("notice", "");
-        const s = document.createElement("small");
-        s.textContent = "Nova · " + new Date(n.at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-        d.append(s, document.createTextNode(n.text));
+        add("notice", n.text, "Nova at the desk");
         if (canNotify && Notification.permission === "granted" && document.hidden) {
-          try { new Notification("Nova", { body: n.text, tag: "nova-" + n.seq }); } catch (e) {}
+          try { new Notification("Nova", { body:n.text, tag:"nova-" + n.seq }); } catch (e) {}
         }
       }
-    } catch (e) { /* offline for a moment */ }
+    } catch (e) {}
   }
-  $("alertBtn").addEventListener("click", async () => {
+  $("rowAlerts").addEventListener("click", async () => {
+    sheetOn(false);
     const p = await Notification.requestPermission();
-    $("alertBtn").hidden = p !== "default";
-    add("note", p === "granted" ? "Alerts on. Keep this page open in the background to get them."
-                                 : "Alerts were not allowed on this phone.");
+    $("rowAlerts").hidden = p !== "default";
+    add("sys", p === "granted" ? "Alerts on while this page is open" : "Alerts not allowed on this phone");
   });
 
-  // ---------------------------------------------------------------- live call
-  // Hands-free: the mic stays open, a simple level detector finds where he
-  // starts and stops talking, each sentence goes to Whisper on the PC, then to
-  // her, and the reply comes back in her own voice (/api/tts). She does not
-  // listen while she is talking (no echo of herself); tap the orb to cut in.
-  const callBox = $("call"), callState = $("callState"), callHeard = $("callHeard"), core = $("callCore");
-  const player = new Audio();
-  let call = null;            // {stream, ctx, an, buf, timer, rec, chunks, phase, floor, loudSince, quietSince, startedAt}
-  function callSay(state, c) { callState.textContent = state; if (c) tint(c); }
+  // ------------------------------------------------------------ live call
+  // Hands-free: a level detector finds where he starts and stops talking,
+  // each sentence goes to Whisper on the PC, then to her, and the reply comes
+  // back in her own voice. She does not listen while she talks; tap the core
+  // to cut in.
+  const callBox = $("call"), callHeard = $("callHeard"), callTime = $("callTime");
+  let call = null;
+  function callState(m, label) { setMode(m); $("callLabel").textContent = label; }
   async function speakCall(t) {
     if (!call) return;
-    call.phase = "speaking"; callSay("speaking", "#ff4fd8");
-    try {
-      const r = await fetch("/api/tts", { method: "POST", headers: { "X-Nova-Token": TOKEN, "Content-Type": "application/json" },
-                                          body: JSON.stringify({ text: t }) });
-      if (!r.ok) throw new Error("tts " + r.status);
-      const url = URL.createObjectURL(await r.blob());
-      player.src = url;
-      await new Promise((done) => { player.onended = player.onerror = done; player.play().catch(done); });
-      URL.revokeObjectURL(url);
-    } catch (e) { speak(t); }
-    if (call) { call.phase = "listening"; call.quietSince = 0; call.loudSince = 0; callSay("listening", "#4dffc3"); }
+    call.phase = "speaking"; callState("speaking", "Speaking");
+    await voice(t);
+    if (call) { call.phase = "listening"; call.quietSince = 0; call.loudSince = 0; callState("listening", "Listening"); }
   }
   async function callTurn(blob) {
-    call.phase = "thinking"; callSay("hearing you", "#4dd2ff");
+    call.phase = "thinking"; callState("transcribing", "Hearing you");
     let heard = "";
-    try {
-      const r = await fetch("/api/transcribe", { method: "POST", headers: { "X-Nova-Token": TOKEN }, body: blob });
-      heard = ((await r.json()).text || "").trim();
-    } catch (e) {}
+    try { heard = ((await (await fetch("/api/transcribe", { method:"POST", headers:{ "X-Nova-Token":TOKEN }, body:blob })).json()).text || "").trim(); } catch (e) {}
     if (!call) return;
-    if (!heard) { call.phase = "listening"; callSay("listening", "#4dffc3"); return; }
-    if (/^(bye|goodbye|hang up|that's all|thanks,? bye)\b/i.test(heard)) { callHeard.textContent = heard; await speakCall("Goodbye, Sir."); hangUp(); return; }
-    callHeard.textContent = "“" + heard + "”"; add("me", heard);
-    callSay("thinking", "#ff4fd8");
+    if (!heard) { call.phase = "listening"; callState("listening", "Listening"); return; }
+    callHeard.textContent = "“" + heard + "”";
+    if (/^(bye|goodbye|hang up|that's all|thanks,? bye)\b/i.test(heard)) { await speakCall("Goodbye, Sir."); hangUp(); return; }
+    add("me", heard);
+    callState("thinking", "Thinking");
     let answer = "";
     try {
-      const r = await api("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
-                                        body: JSON.stringify({ prompt: heard, channel: "phone" }) });
-      answer = r.error ? (r.detail || "Something went wrong, Sir.") : (r.text || "");
+      const r = await api("/api/ask", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ prompt:heard, channel:"phone" }) });
+      answer = r.error ? (r.detail || "Something went wrong, Sir.") : (tidy(r.text) || "Done, Sir.");
     } catch (e) { answer = "I could not reach the PC, Sir."; }
-    answer = answer.replace(/::(CAD|MODEL|HOLO|BUILD)[\s\S]*$/, "").trim() || "Done, Sir.";
     add("nova", answer);
+    callHeard.textContent = answer.length > 160 ? answer.slice(0, 157) + "…" : answer;
     await speakCall(answer);
   }
   function tick() {
@@ -324,80 +604,91 @@
     call.an.getFloatTimeDomainData(call.buf);
     let s = 0; for (const v of call.buf) s += v * v;
     const rms = Math.sqrt(s / call.buf.length), now = performance.now();
-    core.style.setProperty("--lvl", Math.min(1, rms * 9).toFixed(3));
-    if (call.phase !== "listening" && call.phase !== "recording") return;
+    if (call.phase === "listening" || call.phase === "recording") S.amp = call.muted ? 0 : rms * 9;
+    if (call.muted || (call.phase !== "listening" && call.phase !== "recording")) return;
     const loud = rms > Math.max(0.012, call.floor * 3.2);
-    if (!loud && call.phase === "listening") call.floor = call.floor * 0.97 + rms * 0.03;   // learn the room
+    if (!loud && call.phase === "listening") call.floor = call.floor * 0.97 + rms * 0.03;
     if (call.phase === "listening") {
-      if (loud) { call.loudSince = call.loudSince || now;
-        if (now - call.loudSince > 110) {            // speech, not a click
+      if (loud) {
+        call.loudSince = call.loudSince || now;
+        if (now - call.loudSince > 110) {
           call.chunks = []; call.rec = new MediaRecorder(call.stream);
-          call.rec.ondataavailable = (e) => { if (e.data.size) call.chunks.push(e.data); };
-          call.rec.onstop = () => { const b = new Blob(call ? call.chunks : [], { type: call && call.rec.mimeType || "audio/webm" });
-                                    if (call && b.size > 3000 && call.spoke > 350) callTurn(b);
-                                    else if (call) { call.phase = "listening"; callSay("listening", "#4dffc3"); } };
+          call.rec.ondataavailable = e => { if (e.data.size && call) call.chunks.push(e.data); };
+          call.rec.onstop = () => {
+            if (!call) return;
+            const b = new Blob(call.chunks, { type:call.rec.mimeType || "audio/webm" });
+            if (b.size > 3000 && call.spoke > 350) callTurn(b);
+            else { call.phase = "listening"; callState("listening", "Listening"); }
+          };
           call.rec.start(); call.phase = "recording"; call.startedAt = now; call.quietSince = 0; call.spoke = 0;
-          callSay("hearing you", "#4dffc3");
+          $("callLabel").textContent = "Hearing you";
         }
       } else call.loudSince = 0;
-    } else {                                           // recording
-      if (loud) { call.quietSince = 0; call.spoke += 50; }
-      else call.quietSince = call.quietSince || now;
-      if ((call.quietSince && now - call.quietSince > 950) || now - call.startedAt > 30000) {
-        call.phase = "sending"; call.rec.stop();
-      }
+    } else {
+      if (loud) { call.quietSince = 0; call.spoke += 50; } else call.quietSince = call.quietSince || now;
+      if ((call.quietSince && now - call.quietSince > 950) || now - call.startedAt > 30000) { call.phase = "sending"; call.rec.stop(); }
     }
+  }
+  function clock() {
+    if (!call) return;
+    const s = Math.floor((Date.now() - call.began) / 1000);
+    callTime.textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
   }
   async function answerCall() {
     if (call) return;
+    try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); await actx.resume(); } catch (e) {}
     try { player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA="; await player.play(); } catch (e) {}
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const an = ctx.createAnalyser(); an.fftSize = 1024;
-      ctx.createMediaStreamSource(stream).connect(an);
-      call = { stream, ctx, an, buf: new Float32Array(an.fftSize), phase: "speaking", floor: 0.01, loudSince: 0, quietSince: 0, spoke: 0 };
-      call.timer = setInterval(tick, 50);
-      $("answer").hidden = true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true } });
+      const an = actx.createAnalyser(); an.fftSize = 1024; actx.createMediaStreamSource(stream).connect(an);
+      call = { stream, an, buf:new Float32Array(1024), phase:"speaking", floor:0.01, loudSince:0, quietSince:0, spoke:0, muted:false, began:Date.now() };
+      call.timer = setInterval(tick, 50); call.clock = setInterval(clock, 500); clock();
+      $("answer").hidden = true; $("muteBtn").hidden = false; $("hangLabel").textContent = "End";
       callHeard.textContent = "";
       await speakCall("Yes, Sir?");
     } catch (e) {
-      callSay("no microphone", "#ff4d6d");
+      callState("offline", "No microphone");
       callHeard.textContent = "This browser would not give the page the microphone.";
     }
   }
   function hangUp() {
     if (call) {
-      clearInterval(call.timer);
+      clearInterval(call.timer); clearInterval(call.clock);
       try { if (call.rec && call.rec.state === "recording") call.rec.stop(); } catch (e) {}
       call.stream.getTracks().forEach(t => t.stop());
-      call.ctx.close();
     }
-    call = null; player.pause();
-    callBox.classList.remove("on"); $("answer").hidden = false; tint("#c08cff");
-    if (location.search.includes("call=1")) history.replaceState(null, "", location.pathname);
+    call = null; player.pause(); S.amp = 0;
+    callBox.classList.remove("on"); callTime.textContent = "";
+    $("answer").hidden = false; $("muteBtn").hidden = true; $("muteBtn").classList.remove("on"); $("hangLabel").textContent = "Decline";
+    setMode("idle");
+    if (location.search.includes("call=1")) history.replaceState(null, "", location.pathname + location.search.replace(/[?&]call=1/, "").replace(/^&/, "?"));
   }
   function openCall(ringing) {
     callBox.classList.add("on"); callHeard.textContent = "";
-    callSay(ringing ? "incoming call" : "ready", "#6ef2c0");
+    callState(ringing ? "ringing" : "idle", ringing ? "Incoming call" : "Calling");
   }
   $("callBtn").addEventListener("click", () => { openCall(false); answerCall(); });
+  $("rowCall").addEventListener("click", () => { sheetOn(false); openCall(false); answerCall(); });
   $("answer").addEventListener("click", answerCall);
   $("hangup").addEventListener("click", hangUp);
-  core.addEventListener("click", () => { if (call && call.phase === "speaking") { player.pause(); player.onended && player.onended(); } });
+  $("muteBtn").addEventListener("click", () => {
+    if (!call) return;
+    call.muted = !call.muted; $("muteBtn").classList.toggle("on", call.muted);
+    call.stream.getAudioTracks().forEach(t => t.enabled = !call.muted);
+  });
+  $("callCore").addEventListener("click", () => { if (call && call.phase === "speaking") { player.pause(); player.onended && player.onended(); } });
 
+  // ------------------------------------------------------------ start
   api("/api/health").then(h => {
     owner = !!h.owner;
-    status.textContent = h.error ? "offline" : "ready";
-    $("modeNote").textContent = owner
-      ? "Full control from here. Nothing is spoken at the desk."
-      : "Away mode: Nova can look things up and answer, but will not change anything on the PC.";
-    $("screenBtn").hidden = !owner;
-    $("callBtn").hidden = !owner;
-    if (owner && /[?&]call=1\b/.test(location.search)) openCall(true);   // "Answer live" from Telegram
-    $("alertBtn").hidden = !(owner && canNotify && Notification.permission === "default");
+    setMode(h.error ? "offline" : "idle");
+    $("readout").textContent = h.model ? String(h.model).replace(/^claude-/, "") + " · " + (owner ? "full control" : "away mode") : "";
+    $("access").innerHTML = owner ? "Access · <b>Full control</b>" : "Access · Away mode, read only";
+    ["callBtn", "rowCall", "rowScreen"].forEach(id => $(id).hidden = !owner);
+    $("rowAlerts").hidden = !(owner && canNotify && Notification.permission === "default");
     if (owner) { pollNotices(); setInterval(pollNotices, 20000); }
-  }).catch(() => { status.textContent = "offline"; tint("#ff4d6d"); });
+    if (owner && /[?&]call=1\b/.test(location.search)) openCall(true);   // "Answer live" from Telegram
+  }).catch(() => setMode("offline"));
 </script>
 </body>
 </html>
