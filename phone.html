@@ -84,13 +84,46 @@
   #screen .top span { flex:1; color:var(--ink-dim); font-size:13px; }
   #screen .view { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; }
   #screen img { width:100%; display:block; }
+  /* Live call: a hands-free conversation. She listens for him, answers aloud in her own voice. */
+  #callBtn { background:rgba(110,242,192,.14); color:var(--ok); }
+  #call { position:fixed; inset:0; z-index:6; display:none; flex-direction:column; align-items:center; justify-content:center; gap:26px;
+          padding:env(safe-area-inset-top) 24px env(safe-area-inset-bottom); text-align:center;
+          background:radial-gradient(110% 70% at 50% 40%, #1a0e33 0%, rgba(6,3,13,.97) 70%); }
+  #call.on { display:flex; animation:in .3s var(--ease) both; }
+  #call .who { font:300 22px var(--display); letter-spacing:.5em; padding-left:.5em; }
+  #callState { font:500 13px var(--body); color:var(--accent); letter-spacing:.08em; text-transform:uppercase; min-height:20px; }
+  #callHeard { min-height:44px; max-width:520px; color:var(--ink-mid); font-size:14.5px; }
+  .core { width:150px; height:150px; border-radius:50%; position:relative; border:0; padding:0; cursor:pointer;
+          background:radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--accent) 80%, #fff) 0%, var(--accent) 32%, transparent 70%);
+          box-shadow:0 0 70px -10px var(--accent); transform:scale(calc(.9 + var(--lvl, 0) * .5)); transition:transform .08s linear; }
+  .core::after { content:""; position:absolute; inset:-18px; border-radius:50%; border:1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+                 animation:ring 2.4s ease-out infinite; }
+  @keyframes ring { from { transform:scale(.8); opacity:.9; } to { transform:scale(1.35); opacity:0; } }
+  .callbtns { display:flex; gap:22px; }
+  .bigbtn { width:68px; height:68px; border-radius:50%; border:0; display:grid; place-items:center; cursor:pointer; color:#fff; }
+  .bigbtn svg { width:28px; height:28px; fill:none; stroke:currentColor; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
+  .bigbtn[hidden] { display:none; }
+  #answer { background:#22c58b; box-shadow:0 0 34px -6px #22c58b; }
+  #hangup { background:#ff4d6d; box-shadow:0 0 34px -6px #ff4d6d; }
+  #hangup svg { transform:rotate(135deg); }
   @media (prefers-reduced-motion: reduce) { *, *::before { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
 <div class="field"><i class="a1"></i><i class="a2"></i></div>
 <header><b>NOVA</b><span class="pill" id="status">connecting</span>
-  <button class="pill" id="alertBtn" hidden>Alerts</button><button class="pill" id="screenBtn" hidden>Screen</button></header>
+  <button class="pill" id="alertBtn" hidden>Alerts</button><button class="pill" id="screenBtn" hidden>Screen</button>
+  <button class="pill" id="callBtn" hidden>Call</button></header>
+<div id="call" role="dialog" aria-label="Call with Nova">
+  <div class="who">NOVA</div>
+  <button class="core" id="callCore" aria-label="Tap to interrupt her"></button>
+  <div id="callState">incoming call</div>
+  <div id="callHeard"></div>
+  <div class="callbtns">
+    <button class="bigbtn" id="answer" aria-label="Answer"><svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg></button>
+    <button class="bigbtn" id="hangup" aria-label="Hang up"><svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg></button>
+  </div>
+</div>
 <div id="log">
   <div class="note" id="modeNote">Checking what this phone may do…</div>
 </div>
@@ -241,6 +274,118 @@
                                  : "Alerts were not allowed on this phone.");
   });
 
+  // ---------------------------------------------------------------- live call
+  // Hands-free: the mic stays open, a simple level detector finds where he
+  // starts and stops talking, each sentence goes to Whisper on the PC, then to
+  // her, and the reply comes back in her own voice (/api/tts). She does not
+  // listen while she is talking (no echo of herself); tap the orb to cut in.
+  const callBox = $("call"), callState = $("callState"), callHeard = $("callHeard"), core = $("callCore");
+  const player = new Audio();
+  let call = null;            // {stream, ctx, an, buf, timer, rec, chunks, phase, floor, loudSince, quietSince, startedAt}
+  function callSay(state, c) { callState.textContent = state; if (c) tint(c); }
+  async function speakCall(t) {
+    if (!call) return;
+    call.phase = "speaking"; callSay("speaking", "#ff4fd8");
+    try {
+      const r = await fetch("/api/tts", { method: "POST", headers: { "X-Nova-Token": TOKEN, "Content-Type": "application/json" },
+                                          body: JSON.stringify({ text: t }) });
+      if (!r.ok) throw new Error("tts " + r.status);
+      const url = URL.createObjectURL(await r.blob());
+      player.src = url;
+      await new Promise((done) => { player.onended = player.onerror = done; player.play().catch(done); });
+      URL.revokeObjectURL(url);
+    } catch (e) { speak(t); }
+    if (call) { call.phase = "listening"; call.quietSince = 0; call.loudSince = 0; callSay("listening", "#4dffc3"); }
+  }
+  async function callTurn(blob) {
+    call.phase = "thinking"; callSay("hearing you", "#4dd2ff");
+    let heard = "";
+    try {
+      const r = await fetch("/api/transcribe", { method: "POST", headers: { "X-Nova-Token": TOKEN }, body: blob });
+      heard = ((await r.json()).text || "").trim();
+    } catch (e) {}
+    if (!call) return;
+    if (!heard) { call.phase = "listening"; callSay("listening", "#4dffc3"); return; }
+    if (/^(bye|goodbye|hang up|that's all|thanks,? bye)\b/i.test(heard)) { callHeard.textContent = heard; await speakCall("Goodbye, Sir."); hangUp(); return; }
+    callHeard.textContent = "“" + heard + "”"; add("me", heard);
+    callSay("thinking", "#ff4fd8");
+    let answer = "";
+    try {
+      const r = await api("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ prompt: heard, channel: "phone" }) });
+      answer = r.error ? (r.detail || "Something went wrong, Sir.") : (r.text || "");
+    } catch (e) { answer = "I could not reach the PC, Sir."; }
+    answer = answer.replace(/::(CAD|MODEL|HOLO|BUILD)[\s\S]*$/, "").trim() || "Done, Sir.";
+    add("nova", answer);
+    await speakCall(answer);
+  }
+  function tick() {
+    if (!call) return;
+    call.an.getFloatTimeDomainData(call.buf);
+    let s = 0; for (const v of call.buf) s += v * v;
+    const rms = Math.sqrt(s / call.buf.length), now = performance.now();
+    core.style.setProperty("--lvl", Math.min(1, rms * 9).toFixed(3));
+    if (call.phase !== "listening" && call.phase !== "recording") return;
+    const loud = rms > Math.max(0.012, call.floor * 3.2);
+    if (!loud && call.phase === "listening") call.floor = call.floor * 0.97 + rms * 0.03;   // learn the room
+    if (call.phase === "listening") {
+      if (loud) { call.loudSince = call.loudSince || now;
+        if (now - call.loudSince > 110) {            // speech, not a click
+          call.chunks = []; call.rec = new MediaRecorder(call.stream);
+          call.rec.ondataavailable = (e) => { if (e.data.size) call.chunks.push(e.data); };
+          call.rec.onstop = () => { const b = new Blob(call ? call.chunks : [], { type: call && call.rec.mimeType || "audio/webm" });
+                                    if (call && b.size > 3000 && call.spoke > 350) callTurn(b);
+                                    else if (call) { call.phase = "listening"; callSay("listening", "#4dffc3"); } };
+          call.rec.start(); call.phase = "recording"; call.startedAt = now; call.quietSince = 0; call.spoke = 0;
+          callSay("hearing you", "#4dffc3");
+        }
+      } else call.loudSince = 0;
+    } else {                                           // recording
+      if (loud) { call.quietSince = 0; call.spoke += 50; }
+      else call.quietSince = call.quietSince || now;
+      if ((call.quietSince && now - call.quietSince > 950) || now - call.startedAt > 30000) {
+        call.phase = "sending"; call.rec.stop();
+      }
+    }
+  }
+  async function answerCall() {
+    if (call) return;
+    try { player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA="; await player.play(); } catch (e) {}
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const an = ctx.createAnalyser(); an.fftSize = 1024;
+      ctx.createMediaStreamSource(stream).connect(an);
+      call = { stream, ctx, an, buf: new Float32Array(an.fftSize), phase: "speaking", floor: 0.01, loudSince: 0, quietSince: 0, spoke: 0 };
+      call.timer = setInterval(tick, 50);
+      $("answer").hidden = true;
+      callHeard.textContent = "";
+      await speakCall("Yes, Sir?");
+    } catch (e) {
+      callSay("no microphone", "#ff4d6d");
+      callHeard.textContent = "This browser would not give the page the microphone.";
+    }
+  }
+  function hangUp() {
+    if (call) {
+      clearInterval(call.timer);
+      try { if (call.rec && call.rec.state === "recording") call.rec.stop(); } catch (e) {}
+      call.stream.getTracks().forEach(t => t.stop());
+      call.ctx.close();
+    }
+    call = null; player.pause();
+    callBox.classList.remove("on"); $("answer").hidden = false; tint("#c08cff");
+    if (location.search.includes("call=1")) history.replaceState(null, "", location.pathname);
+  }
+  function openCall(ringing) {
+    callBox.classList.add("on"); callHeard.textContent = "";
+    callSay(ringing ? "incoming call" : "ready", "#6ef2c0");
+  }
+  $("callBtn").addEventListener("click", () => { openCall(false); answerCall(); });
+  $("answer").addEventListener("click", answerCall);
+  $("hangup").addEventListener("click", hangUp);
+  core.addEventListener("click", () => { if (call && call.phase === "speaking") { player.pause(); player.onended && player.onended(); } });
+
   api("/api/health").then(h => {
     owner = !!h.owner;
     status.textContent = h.error ? "offline" : "ready";
@@ -248,6 +393,8 @@
       ? "Full control from here. Nothing is spoken at the desk."
       : "Away mode: Nova can look things up and answer, but will not change anything on the PC.";
     $("screenBtn").hidden = !owner;
+    $("callBtn").hidden = !owner;
+    if (owner && /[?&]call=1\b/.test(location.search)) openCall(true);   // "Answer live" from Telegram
     $("alertBtn").hidden = !(owner && canNotify && Notification.permission === "default");
     if (owner) { pollNotices(); setInterval(pollNotices, 20000); }
   }).catch(() => { status.textContent = "offline"; tint("#ff4d6d"); });

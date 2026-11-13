@@ -42,7 +42,8 @@ TIERS = {
     "capture_screen": "free", "volume_status": "free",
     "recall": "free", "day_log": "free",
     "server_status": "free", "minecraft_players": "free",
-    "say": "free",
+    "say": "free", "call_me": "free",   # reaches only Sir's own paired Telegram
+    "list_skills": "free", "save_skill": "announce", "forget_skill": "announce",
     "set_volume": "announce", "mute": "announce", "media_key": "announce",
     "focus_window": "announce", "remember": "announce",
     "open_app": "announce", "type_text": "announce",
@@ -421,6 +422,36 @@ def say(text: str) -> str:
     """Speak a line aloud through Nova's voice, outside the normal reply."""
     r = bridge("/api/speak", {"text": text})
     return "Spoken." if r.get("ok") else f"Could not speak: {r.get('error')}"
+
+
+def call_me(message: str, live: bool = True) -> str:
+    """Call Sir on his phone (Telegram): a ringing message, a spoken voice note, and an
+    "Answer live" button for a two-way call. For when he asked to be called or told when
+    something finishes, or for something urgent while he is away. Only ever reaches Sir."""
+    r = bridge("/api/telegram/ring", {"text": message, "live": live}, timeout=90)
+    if r.get("error"):
+        return f"Could not call: {r['error']}"
+    return "Called Sir on Telegram" + (" with a voice note" if r.get("voice") else "") + "."
+
+
+def list_skills() -> str:
+    """The how-to recipes Nova has written for herself after doing tasks (name, uses, when)."""
+    import nova_skills
+    return nova_skills.listing()
+
+
+def save_skill(name: str, when: str, steps: str) -> str:
+    """Write (or rewrite) a how-to recipe for a kind of task, for "remember how to do this".
+    `when`: the requests it applies to; `steps`: short lines, tools in order, plus Pitfall: lines."""
+    import nova_skills
+    return "Saved skill " + nova_skills.save(name, when, steps).stem + "."
+
+
+def forget_skill(name: str) -> str:
+    """Delete one of her self-written skills by name."""
+    import nova_skills
+    gone = nova_skills.forget(name)
+    return ("Forgot: " + ", ".join(gone)) if gone else "No skill by that name."
 
 
 def server_status() -> str:
@@ -1248,7 +1279,7 @@ ALL = [web_research, web_find, web_text, web_extract, watch_page, list_page_watc
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
        remind, list_reminders, cancel_reminder, schedule_meeting, list_meetings, cancel_meeting, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
-       remember, recall, forget, day_log, say,
+       remember, recall, forget, day_log, say, call_me, list_skills, save_skill, forget_skill,
        server_status, minecraft_players, minecraft_say, minecraft_save,
        minecraft_start, minecraft_stop, minecraft_restart]
 

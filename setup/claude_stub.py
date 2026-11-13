@@ -41,6 +41,23 @@ for line in sys.stdin:
 
     if "single word: ready" in low:
         reply = "ready"
+    elif "library of how-to recipes" in low:
+        # the skill judge (nova_skills.LEARN_PROMPT)
+        reply = ("NAME: Tidy the downloads folder\n"
+                 "WHEN: tidy, clean up or sort the downloads folder\n"
+                 "REPLACES: none\n"
+                 "STEPS:\n1. recent_files where=downloads days=30\n"
+                 "2. Bash: move installers into Downloads/Installers\n"
+                 "Pitfall: open_app cannot open folders; use Bash explorer instead.")
+    elif "tidy the downloads" in low:
+        # a three-tool turn, the second tool failing first time
+        for name, bad in (("mcp__nova__recent_files", False), ("mcp__nova__open_app", True), ("Bash", False)):
+            out({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": name, "input": {"where": "downloads"}}]}})
+            time.sleep(0.1)
+            out({"type": "user", "message": {"content": [{"type": "tool_result", "is_error": bad,
+                 "content": [{"type": "text", "text": "no app called downloads"}] if bad else "ok"}]}})
+        reply = "Your downloads are tidy, Sir."
     elif "tool" in low:
         # a turn that reaches for a tool before saying anything
         time.sleep(0.4)
