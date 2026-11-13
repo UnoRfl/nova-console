@@ -40,7 +40,11 @@ CDP_PORT = 9333
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 BRIDGE = "http://127.0.0.1:8765"
 # Read-only sites: she may look, never click, type or press keys there.
-READ_ONLY_HOSTS = re.compile(r"(?:^|\.)(?:messenger\.com|facebook\.com|fb\.com|fbsbx\.com|"
+# Sir's rule (2026-11-13): nothing made by Meta is ever written to -- Facebook,
+# Messenger, Instagram, Threads, WhatsApp Web. Gmail can SEND, but only via
+# gmail_send / gmail_reply; generic clicks and typing stay refused there.
+READ_ONLY_HOSTS = re.compile(r"(?:^|\.)(?:messenger\.com|facebook\.com|fb\.com|fbsbx\.com|fb\.me|m\.me|"
+                             r"instagram\.com|threads\.net|threads\.com|whatsapp\.com|whatsapp\.net|meta\.com|"
                              r"mail\.google\.com|accounts\.google\.com|myaccount\.google\.com)$", re.I)
 
 
@@ -217,7 +221,7 @@ class Hands:
     def _guard(self, page, what: str) -> None:
         if READ_ONLY_HOSTS.search(host(page.url)):
             raise PermissionError(f"{what} refused: {host(page.url)} is read-only for Nova "
-                                  "(Messenger/Facebook). Use messenger_chats / messenger_read to read it.")
+                                  "(Meta apps are read-only by Sir's rule; on Gmail use gmail_send / gmail_reply).")
 
     def _snapshot(self, page, max_chars: int = MAX_TEXT, mark: bool = True) -> dict:
         self._settle(page)
@@ -539,7 +543,69 @@ class Hands:
         page.go_back()
         return {"from": f"{hit['from']} <{hit['email']}>", "subject": subject, "date": hit["date"],
                 "body": text[-int(max_chars):],
-                "note": "Read-only. Opening it marks it read in Gmail."}
+                "note": "Opening it marks it read in Gmail."}
+
+    # ------------------------------------------------- Gmail: send and reply
+    # Sir allows email to be sent (Meta apps stay read-only). Only these two
+    # functions may type into Gmail; web_click/web_type are still refused
+    # there, so nothing can be deleted, archived or forwarded by accident.
+    EMAIL = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[A-Za-z]{2,}$")
+
+    def _gmail_body(self, page, body: str) -> None:
+        box = page.locator('div[aria-label="Message Body"][contenteditable="true"]').last
+        box.wait_for(timeout=20000)
+        box.click()
+        box.fill(body)
+
+    def _gmail_send_click(self, page) -> None:
+        btn = page.locator('div[role="button"][data-tooltip^="Send"], div[role="button"][aria-label^="Send"]')
+        if btn.count():
+            btn.last.click()
+        else:
+            page.keyboard.press("Control+Enter")
+        try:
+            page.get_by_text(re.compile(r"Message sent|Sending", re.I)).first.wait_for(timeout=15000)
+        except Exception:                             # noqa: BLE001
+            raise RuntimeError("Gmail did not confirm the send; check the Sent folder before retrying")
+
+    def do_gmail_send(self, to: str, subject: str, body: str, cc: str = "") -> dict:
+        tos = [a.strip() for a in re.split(r"[,;]", to) if a.strip()]
+        ccs = [a.strip() for a in re.split(r"[,;]", cc) if a.strip()]
+        bad = [a for a in tos + ccs if not self.EMAIL.match(a)]
+        if not tos or bad:
+            raise ValueError(f"need full email addresses; not valid: {bad or to!r}")
+        q = urllib.parse.urlencode({"view": "cm", "fs": "1", "tf": "1", "to": ",".join(tos),
+                                    "cc": ",".join(ccs), "su": subject})
+        page = self.page()
+        page.goto("https://mail.google.com/mail/u/0/?" + q, wait_until="domcontentloaded")
+        self._current = page
+        if "accounts.google.com" in host(page.url):
+            raise PermissionError("Gmail is not signed in in Nova's browser.")
+        self._gmail_body(page, body)
+        self._gmail_send_click(page)
+        return {"sent": True, "to": tos, "cc": ccs, "subject": subject}
+
+    def do_gmail_reply(self, match: str, body: str, query: str = "", reply_all: bool = False) -> dict:
+        page = self._gmail("search/" + urllib.parse.quote(query) if query else "inbox")
+        rows = page.evaluate(self.ROWS_JS, 50)
+        want = match.lower().strip()
+        hit = next((r for r in rows if want in (r["from"] + " " + r["email"] + " " + r["subject"] + " "
+                                                + r["snippet"]).lower()), None)
+        if not hit:
+            raise LookupError(f"no message in this view matches {match!r}; try gmail_inbox with a query")
+        page.locator("tr.zA").filter(visible=True).nth(hit["i"]).click()
+        page.wait_for_selector("div.a3s, h2.hP", timeout=20000)
+        label = "Reply all" if reply_all else "Reply"
+        btn = page.locator(f'[role="button"][aria-label="{label}"], [role="link"]:text-is("{label}"), '
+                           f'span[role="link"]:text-is("{label}")')
+        if not btn.count():
+            raise RuntimeError(f"could not find the {label} button in this thread")
+        btn.last.click()
+        self._gmail_body(page, body)
+        self._gmail_send_click(page)
+        taint("gmail")
+        return {"sent": True, "replied_to": f"{hit['from']} <{hit['email']}>", "subject": hit["subject"],
+                "reply_all": reply_all}
 
 
 # ------------------------------------------------------------------ service

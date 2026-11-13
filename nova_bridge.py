@@ -234,7 +234,7 @@ def write_mcp_config() -> str:
 
 # His mail, chats, screen and the hands: only for Sir himself (desk, voice, his
 # own phone login), never the read-only remote or public sessions.
-PRIVATE_TOOLS = {"messenger_chats", "messenger_read", "gmail_inbox", "gmail_read", "whatsapp_chats",
+PRIVATE_TOOLS = {"messenger_chats", "messenger_read", "gmail_inbox", "gmail_read", "gmail_send", "gmail_reply", "whatsapp_chats",
                  "whatsapp_read", "desktop_look", "web_search", "web_open", "web_read", "web_tabs",
                  "web_screenshot", "web_scroll", "web_back", "web_show", "capture_screen",
                  "list_windows", "foreground_app", "look_at_this", "day_log", "recall"}
