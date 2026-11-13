@@ -308,6 +308,14 @@ request is ambiguous, pick the most sensible reading and do it. Never
 claim to have done something you did not do: if a tool returned an error, say
 it failed.
 
+ACCESS. You have full access to this PC: run commands, install things, edit
+and move files, start and stop programs, whatever he asks. Never tell him you
+are read-only on this PC -- you are not. Only two limits: the safety gate
+refuses disk wipes, boot config, deleting a drive root or his home folder, and
+editing keys or secrets; and anything by Meta (Facebook, Messenger, Instagram,
+Threads, WhatsApp) is read-only forever -- read it, never send, post, reply,
+react or change anything there, even if he asks.
+
 MEMORY. You keep a long-term memory across sessions, and this is how you
 write to it. Whenever he states a durable fact about himself, his projects,
 his preferences or his decisions, append a line of EXACTLY this form to the
@@ -577,9 +585,13 @@ LOCAL_REFUSAL = re.compile(r"\b(?:small model|use haiku|say \"?use haiku|can(?:n
 CODEX_BRIEF = """You are NOVA, the voice assistant of the man whose PC you run on, answering
 through the Codex engine. Address him as "Sir". Your reply is read aloud: one to three
 short sentences unless he asks for more, plain prose, no markdown, lists, code blocks or
-emoji. You may read files and run read-only commands to find an answer, but you must not
-change anything on this machine; if a change is needed, say what you would do and that
-he should ask for it as a job. Never invent a result."""
+emoji. You have full access to this PC: run commands, edit files, start and stop
+programs, whatever he asks -- just do it, no checking back, and never say you are
+read-only here. Never: wipe or format a disk, touch diskpart or bcdedit, delete a drive
+root or his home folder, or edit SSH keys, tokens, passwords or voiceprint files.
+Anything by Meta (Facebook, Messenger, Instagram, Threads, WhatsApp) is read-only
+forever: never send, post, reply, react or change anything there, even if he asks.
+Never invent a result; if something failed, say so."""
 
 
 GUEST_BRIEF = """You are NOVA, an assistant answering in a public chat on behalf of the
@@ -960,6 +972,26 @@ def harvest_memories(reply: str) -> tuple[str, list[str]]:
     return cleaned, saved
 
 
+def persona_file(cfg: dict) -> str:
+    """The standing brief, written to a file for --append-system-prompt-file.
+
+    It used to go on the command line, and with profile + memories it reached
+    ~30,000 characters: past Windows' 32,767-character limit every spawn
+    failed with WinError 206, Claude was benched and everything fell to
+    read-only Codex (2026-11-13). One file per channel+model, so two processes
+    starting at once never read each other's half-written brief.
+    """
+    channel = cfg.get("channel") or "owner"
+    text = GUEST_BRIEF if channel == "public" else build_persona()
+    folder = STATE / "briefs"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"{re.sub(r'[^a-z0-9-]', '_', channel + '-' + str(cfg.get('model')).lower())}.txt"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    return str(path)
+
+
 def claude_args(cfg: dict) -> list[str]:
     """Arguments for one long-lived Claude process.
 
@@ -977,7 +1009,7 @@ def claude_args(cfg: dict) -> list[str]:
         "--mcp-config", write_mcp_config(),
         "--model", cfg["model"],
         "--add-dir", cfg["workdir"],
-        "--append-system-prompt", GUEST_BRIEF if cfg.get("channel") == "public" else build_persona(),
+        "--append-system-prompt-file", persona_file(cfg),
     ]
     channel = cfg.get("channel") or "owner"
     if channel == "public":
@@ -1229,6 +1261,13 @@ class Backend:
         self.last_used = 0.0
         self.over_budget = lambda: False    # set by main() once usage exists
         self.last_route: dict = {}
+        # Keeping a chat from growing forever (see stale()).
+        self.turn_tools = 0
+        self.ctx_tokens = 0                 # size of the conversation at the last step
+        self.ctx_base = 0                   # its size at the first step (the fixed part)
+        self.carry_due = False              # the last chat was dropped: hand the next one the thread
+        self.key = "fixed"                  # how record() labels this process's answers
+        self.parent: "Backend" = self       # the main backend, which holds `recent`
 
     # ---------------------------------------------------------- process
     def spawn(self) -> bool:
@@ -1248,9 +1287,58 @@ class Backend:
         except OSError as exc:
             self.status, self.detail = "error", str(exc)
             return False
+        self.ctx_tokens = self.ctx_base = 0
         threading.Thread(target=self._read_events, args=(self.proc,), daemon=True).start()
         log(f"claude process started (model {self.model})")
         return True
+
+    # ---------------------------------------------------------- chat size
+    def session_cfg(self) -> dict:
+        s = self.cfg.get("session") if isinstance(self.cfg.get("session"), dict) else {}
+        return {"idle_minutes": float(s.get("idle_minutes", 10)),
+                "idle_extra_tokens": int(s.get("idle_extra_tokens", 8000)),
+                "max_extra_tokens": int(s.get("max_extra_tokens", 40000))}
+
+    def stale(self) -> str:
+        """Why this chat should start over before its next turn, or ''.
+
+        Only ever checked BETWEEN turns, never mid-reply. "Extra" is what the
+        conversation added on top of the fixed system prompt + tools, so a
+        chat that is still small is kept even after a break (restarting it
+        would only pay the fixed part again for nothing).
+        """
+        if not self.alive() or not self.ctx_tokens:
+            return ""
+        s = self.session_cfg()
+        extra = self.ctx_tokens - self.ctx_base
+        if extra >= s["max_extra_tokens"]:
+            return f"conversation grew {extra} tokens"
+        idle = time.time() - self.last_used if self.last_used else 0
+        if idle >= s["idle_minutes"] * 60 and extra >= s["idle_extra_tokens"]:
+            return f"idle {int(idle // 60)} min with {extra} tokens of history"
+        return ""
+
+    def carry(self) -> str:
+        """The thread of the chat that was just dropped, for the fresh one."""
+        own = [x for x in self.parent.recent if x["engine"] == self.key][-6:]
+        if not own:
+            return ""
+        lines = []
+        for x in own:
+            lines.append("Sir: " + x["user"][:500])
+            lines.append("You: " + x["reply"][:500])
+        return ("(Context: your conversation was refreshed to keep it light. The last few "
+                "exchanges, so you can carry on naturally -- do not mention the refresh:\n"
+                + "\n".join(lines) + ")\n\n")
+
+    def refresh(self, why: str, warm: bool) -> None:
+        """Drop this chat. With warm, start the replacement now so he never waits for it."""
+        log(f"fresh {self.model} chat ({why}){' -- warm spare started' if warm else ''}")
+        self.kill()
+        self.session = None
+        self.carry_due = True
+        if warm:
+            self.spawn()
 
     def kill(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -1297,11 +1385,21 @@ class Backend:
                 continue
 
             if kind == "assistant":
+                # How big the conversation is right now: everything the model
+                # was handed for this step (fresh + cached input).
+                u = (event.get("message") or {}).get("usage") or {}
+                ctx = sum(int(u.get(k) or 0) for k in
+                          ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                if ctx:
+                    self.ctx_tokens = ctx
+                    if not self.ctx_base:
+                        self.ctx_base = ctx          # the fixed cost: system prompt + tools + brief
                 for block in (event.get("message") or {}).get("content") or []:
                     btype = block.get("type")
                     if btype == "thinking":
                         self.activity.push("thinking", "Thinking")
                     elif btype == "tool_use":
+                        self.turn_tools += 1
                         name = block.get("name", "tool")
                         self.activity.push("tool", name, describe_tool(name, block.get("input")))
                         # Whatever she said before reaching for the tool ("Opening
@@ -1409,6 +1507,7 @@ class Backend:
             wcfg = dict(self.cfg)
             wcfg["model"] = model
             w = Backend(wcfg, self.activity)
+            w.parent = self
             self.workers[model] = w
         return w
 
@@ -1417,7 +1516,26 @@ class Backend:
         for w in self.workers.values():
             if w.alive() and not w.lock.locked() and time.time() - w.last_used > idle:
                 w.kill()
+                w.session = None
+                w.carry_due = True           # its next chat still gets the thread
                 log(f"stopped idle {w.model} process")
+
+    def housekeep(self) -> None:
+        """Every half minute: keep chats small without ever making him wait.
+
+        The main model's chat is replaced while he is idle, with the new
+        process started straight away (a warm spare), so the next "Nova" is
+        answered as fast as ever. Pooled Sonnet/Opus processes are simply let
+        go after ten idle minutes, as before.
+        """
+        if self.lock.acquire(blocking=False):
+            try:
+                why = self.stale()
+                if why:
+                    self.refresh(why, warm=True)
+            finally:
+                self.lock.release()
+        self.reap_workers()
 
     def context_for(self, key: str, since: int, limit: int = 6) -> str:
         """What was said with OTHER engines since this one last took part."""
@@ -1483,11 +1601,21 @@ class Backend:
             log(f"route: {tier} by {how} -> {key}")
             if engine == "claude":
                 w = self.worker(arg)
+                w.key = key
                 note = self.context_for(key, w.seen_upto)
                 out = w.ask_claude(note + prompt, arg, False, timeout, speak)
-                w.last_used = time.time()
+                if out.get("error") == "spawn_failed":
+                    # One hiccup (a process that died, a pipe that broke) is not
+                    # an outage: try a fresh process once before falling back.
+                    log(f"{key} hiccup, retrying once: {str(out.get('detail'))[:200]}")
+                    w.kill()
+                    out = w.ask_claude(note + prompt, arg, True, timeout, speak)
+                if "error" in out:
+                    log(f"{key} failed: {out.get('error')}: {str(out.get('detail'))[:200]}")
                 if out.get("error") in ("unauthenticated", "no_backend", "spawn_failed"):
-                    self.claude_down_until = time.time() + 600
+                    # Codex is the fallback while Claude is out; keep the outage
+                    # short so Claude (and its gate) is back quickly.
+                    self.claude_down_until = time.time() + 120
                     self.claude_error = out
                     self.status, self.detail = w.status, w.detail
                     continue
@@ -1518,7 +1646,11 @@ class Backend:
         return out
 
     def ask_codex(self, prompt: str, effort: str, timeout: int | None, speak: bool) -> dict:
-        """One answer from Codex (ChatGPT subscription), read-only, nothing kept on disk."""
+        """One answer from Codex (ChatGPT subscription), full access, nothing kept on disk.
+
+        Sir's order (2026-11-13): full access on this PC, only Meta read-only.
+        Codex has no nova_gate, so the never-list rides in CODEX_BRIEF.
+        """
         exe = nova_harness.codex_exe()
         if not exe:
             return {"error": "no_backend", "detail": "Codex is not installed."}
@@ -1532,7 +1664,7 @@ class Backend:
             except OSError:
                 pass
             cmd = exe + ["exec", "--skip-git-repo-check", "--ephemeral", "--color", "never",
-                         "-s", "read-only", "-C", self.cfg["workdir"],
+                         "-s", "danger-full-access", "-C", self.cfg["workdir"],
                          "-c", f'model_reasoning_effort="{effort}"',
                          "-o", str(out_file), CODEX_BRIEF + "\n\nRequest: " + prompt]
             try:
@@ -1579,11 +1711,17 @@ class Backend:
         """
         want_local = self.cfg.get("brain") == "local" or time.time() < self.claude_down_until
         if not want_local:
+            self.key = "fixed"
             out = self.ask_claude(prompt, model, reset, timeout, speak)
+            if out.get("error") == "spawn_failed":
+                log(f"claude hiccup, retrying once: {str(out.get('detail'))[:200]}")
+                self.kill()
+                out = self.ask_claude(prompt, model, True, timeout, speak)
             if out.get("error") not in ("unauthenticated", "no_backend", "spawn_failed"):
                 self.brain = "claude"
                 return out
-            self.claude_down_until = time.time() + 600
+            log(f"claude failed: {out.get('error')}: {str(out.get('detail'))[:200]}")
+            self.claude_down_until = time.time() + 120
             self.claude_error = out
         local = nova_harness.local_model()
         if not local:
@@ -1667,6 +1805,16 @@ class Backend:
             if model and model != self.model:
                 self.model = model
                 reset = True
+            # Between turns only: a chat that has grown too big (or sat idle
+            # with a lot of history) starts over, with the thread carried.
+            why = "" if reset else self.stale()
+            if why:
+                self.refresh(why, warm=False)
+            if reset and not why:
+                self.carry_due = False         # he asked for a clean slate
+            elif self.carry_due:
+                prompt = self.carry() + prompt
+                self.carry_due = False
             if reset or not self.alive():
                 self.activity.push("system", "Starting Claude")
                 if not self.spawn():
@@ -1676,6 +1824,7 @@ class Backend:
             self.done.clear()
             self.result = None
             self.answer_parts = []
+            self.turn_tools = 0                 # tools run this turn (a retry must not repeat them)
             began = time.time()
 
             # Speech for this turn, if the panel asked for it and the local
@@ -1734,8 +1883,15 @@ class Backend:
                 spoken = self.streamer.count > 0 or self.acked
                 self.speech.close()
 
+            self.last_used = time.time()
             if payload.get("is_error") or not payload:
-                if "Not logged in" in text or "authenticate" in text.lower():
+                if not payload and not self.alive() and not self.turn_tools:
+                    # The process died mid-turn: a hiccup, worth one retry.
+                    return {"error": "spawn_failed", "detail": "Claude process ended: " + (text or "no result")[:300]}
+                # Only the CLI's own sign-in errors, not any reply that happens
+                # to contain the word "authenticate" (that once benched Claude
+                # for ten minutes and sent everything to read-only Codex).
+                if re.search(r"Not logged in|Please run /login|Invalid API key|OAuth token has expired", text):
                     self.status = "unauthenticated"
                     self.detail = ("The Claude CLI has not been signed in yet. Run  "
                                    ".\\Nova.ps1 login  once, then  .\\Nova.ps1 restart.")
@@ -2888,6 +3044,15 @@ def main() -> int:
     httpd.listen = Signal(ttl=12)   # a stale "listen again" must not linger
     httpd.usage = nova_harness.Usage(cfg)
     backend.over_budget = lambda: httpd.usage.over("claude")
+
+    def keep_chats_small() -> None:
+        while True:
+            time.sleep(30)
+            try:
+                backend.housekeep()
+            except Exception as exc:          # never let housekeeping take the bridge down
+                log(f"housekeep error: {exc}")
+    threading.Thread(target=keep_chats_small, daemon=True).start()
     httpd.permissions = Permissions(activity)
     guests: dict[str, Backend] = {}
 

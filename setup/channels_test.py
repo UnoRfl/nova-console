@@ -44,7 +44,9 @@ check("public: only the two Minecraft status tools", sorted(allowed(pub)) ==
       ["mcp__nova__minecraft_players", "mcp__nova__server_status"], str(allowed(pub)))
 check("public: no approval route, so nothing can ever be escalated", "--permission-prompt-tool" not in pub)
 check("public: file reading is explicitly disallowed", "Read" in pub[pub.index("--disallowedTools"):])
-persona = pub[pub.index("--append-system-prompt") + 1]
+persona = Path(pub[pub.index("--append-system-prompt-file") + 1]).read_text(encoding="utf-8")
+check("command line stays well under Windows' 32,767-char limit",
+      len(subprocess.list2cmdline(own)) < 16000, str(len(subprocess.list2cmdline(own))))
 check("public: the brief contains none of Sir's profile or memories",
       "Sir" not in persona and "Unoryx" not in persona and "remember:" not in persona)
 check("remote: read-only, cannot be approved into more", "--permission-prompt-tool" not in rem

@@ -304,19 +304,30 @@ class Jobs:
             exe = claude_exe()
             if not exe:
                 return None
-            # acceptEdits: the worker may edit files inside its own folder
-            # without asking; shell commands are still refused. Starting a job
-            # at all is a confirm-tier action, which is where Sir says yes.
+            # Full access, same as Nova herself (Sir, 2026-11-13): edits go
+            # through, and everything else (shell included) is put to Nova's
+            # own gate, which only refuses the never-list. acceptEdits alone
+            # silently refused every shell command in a -p job.
             # stream-json, not json: one event per line as the worker goes,
             # which is what lets Nova say how far along it is. The last line
             # is still the result object _watch reads.
-            return [exe, "-p", task, "--output-format", "stream-json", "--verbose",
+            args = [exe, "-p", task, "--output-format", "stream-json", "--verbose",
                     "--model", model or "sonnet", "--permission-mode", "acceptEdits"]
+            mcp = ROOT / "mcp.json"
+            if mcp.is_file():
+                args += ["--mcp-config", str(mcp), "--permission-prompt-tool", "mcp__nova__approve"]
+            return args
         if engine == "codex":
             exe = codex_exe()
             if not exe:
                 return None
-            return exe + ["exec", "--skip-git-repo-check", task]
+            # Codex's default exec sandbox is read-only. Full access, with the
+            # never-list and the Meta rule stated up front (Codex has no gate).
+            rules = ("Rules: never wipe or format a disk, touch diskpart or bcdedit, delete a "
+                     "drive root or the home folder, or edit SSH keys, tokens, passwords or "
+                     "voiceprint files. Anything by Meta (Facebook, Messenger, Instagram, "
+                     "Threads, WhatsApp) is read-only: never send, post, reply or change anything there.\n\n")
+            return exe + ["exec", "--skip-git-repo-check", "-s", "danger-full-access", rules + task]
         return None
 
     def start(self, task: str, engine: str = "claude", model: str = "sonnet",
