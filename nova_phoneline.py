@@ -60,9 +60,16 @@ class Detector:
 
     def reset(self) -> None:
         self.state, self.loud, self.quiet, self.voiced, self.buf, self.pre = "idle", 0, 0, 0, bytearray(), []
+        self.rest = b""
 
     def feed(self, pcm: bytes) -> bytes | None:
         """Feed audio; returns one finished utterance (PCM) when he stops talking."""
+        # Call audio arrives 10 ms at a time, half of one analysis window. Fed
+        # piece by piece, no window was ever complete and she heard NOTHING on
+        # a real call ("Yes, Sir?" and then silence). Carry the remainder over.
+        pcm = self.rest + pcm
+        whole = len(pcm) // (WIN * 2) * (WIN * 2)
+        pcm, self.rest = pcm[:whole], pcm[whole:]
         a = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
         out = None
         for i in range(0, len(a) - WIN + 1, WIN):
@@ -103,6 +110,7 @@ class PhoneLine:
         self.speaking_until = 0.0
         self.last_heard = 0.0
         self.det = Detector()
+        self.rx_bytes, self.rx_peak = 0, 0     # what the call delivered from his side (for the log)
         self.turn_busy = threading.Lock()
         self.stop = threading.Event()
 
@@ -200,6 +208,7 @@ class PhoneLine:
             self.greeting = "Yes, Sir?"
         elif name == "answered":
             self.state, self.last_heard = "listening", time.time()
+            self.rx_bytes, self.rx_peak = 0, 0
             greet = self.greeting or "Yes, Sir?"
             self.greeting = ""
             self.log(f"phoneline: call answered ({'he rang' if ev.get('incoming') else 'she rang'})")
@@ -208,7 +217,8 @@ class PhoneLine:
             was = self.greeting
             self.state, self.greeting = "idle", ""
             self.det.reset()
-            self.log(f"phoneline: call ended ({ev.get('reason')})")
+            self.log(f"phoneline: call ended ({ev.get('reason')}); heard {self.rx_bytes / (RATE * 2):.1f} s of "
+                     f"audio from him, peak level {self.rx_peak / 32768:.2f}")
             if not ev.get("answered") and was and self.on_missed:
                 self.on_missed(was)
         elif name == "error":
@@ -219,6 +229,10 @@ class PhoneLine:
                     self.on_missed(was)
 
     def _audio(self, pcm: bytes) -> None:
+        self.rx_bytes += len(pcm)
+        if pcm:
+            peak = int(np.abs(np.frombuffer(pcm[:len(pcm) // 2 * 2], dtype="<i2")).max())
+            self.rx_peak = max(self.rx_peak, peak)
         if self.state != "listening" or time.time() < self.speaking_until:
             return
         done = self.det.feed(pcm)

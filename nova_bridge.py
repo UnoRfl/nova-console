@@ -3905,7 +3905,16 @@ def main() -> int:
     httpd.phoneline = nova_phoneline.PhoneLine(
         pl_cfg, ask=telegram_ask, transcribe=nova_stt.transcribe,
         synth=synth_long if nova_voice else (lambda t: (_ for _ in ()).throw(RuntimeError("no voice"))),
-        log=log, on_missed=lambda t: httpd.telegram.ring(t), on_turn=call_turn)
+        log=log, on_missed=lambda t: missed_call(t), on_turn=call_turn)
+
+    def missed_call(text: str) -> None:
+        # Sir, 2026-11-14: he does not want the old bot's "Nova is calling"
+        # message + voice note now that she has her own number.
+        # config phoneline.bot_fallback: true brings it back.
+        if pl_cfg.get("bot_fallback", False):
+            httpd.telegram.ring(text)
+        else:
+            log(f"phoneline: he did not get the call (no bot fallback): {text[:80]}")
 
     def ring_sir(text: str, live: bool = True) -> dict:
         """Call Sir: a real Telegram call from her own number when that line is up,
@@ -3913,6 +3922,10 @@ def main() -> int:
         if live and pl_cfg.get("real_calls", True) and httpd.phoneline.call(text):
             log(f"phoneline: ringing Sir: {text[:80]}")
             return {"ok": True, "real_call": True}
+        if live and pl_cfg.get("real_calls", True) and not pl_cfg.get("bot_fallback", False):
+            log("phoneline: could not ring (line not connected or already in a call); no bot fallback")
+            return {"ok": False, "error": "line_unavailable",
+                    "detail": "Her phone line is not connected or is already in a call."}
         return httpd.telegram.ring(text, live=live)
 
     httpd.ring_sir = ring_sir
