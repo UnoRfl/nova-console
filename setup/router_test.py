@@ -41,6 +41,15 @@ CASES = {
     "use opus for this: what should I name my cat": {"expert"},
     "ask codex to explain this repo": {"codex"},
     "use the local model, what's two plus two": {"chat"},
+    # Tagalog / Taglish never reaches the 3B local model: it cannot write it.
+    "nova kamusta ka naman": {"normal"},
+    "salamat nova": {"normal"},
+    "ang hirap ng math namin kanina grabe": {"normal", "hard"},
+    "ano mas okay, jollibee o mcdo?": {"normal"},
+    "bakit ba laging traffic sa edsa": {"normal"},
+    "pagod na ko": {"normal"},
+    "tell me a joke about my mo": {"chat"},          # one stray word is not Tagalog
+    "i am tired": {"chat"},
 }
 
 local = nova_harness.local_model()

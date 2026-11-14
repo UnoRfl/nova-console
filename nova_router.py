@@ -244,6 +244,29 @@ def _clean(prompt: str) -> str:
     return re.sub(r"^(?:(?:hey|okay|ok|yo) )?nova[,!.]?\s*", "", said).strip()
 
 
+# Tagalog function words that English sentences do not contain. Two different
+# ones mark the sentence as Tagalog/Taglish; one is enough from the second,
+# unmistakable set when he only said a few words ("salamat nova").
+TAGALOG_WORDS = frozenset(
+    "ang ng mga ako ko ikaw mo niya siya kami tayo natin namin nila sila ito yung yun iyon "
+    "dito diyan dyan doon hindi wala meron ba po naman lang nga kasi pala rin daw ano sino "
+    "bakit paano pano saan nasan nasaan kailan kelan magkano gusto ayaw pwede puwede sige "
+    "salamat oo opo talaga grabe kamusta kumusta pagod gutom tulog mamaya kanina ngayon "
+    "kahapon tapos alam sabi kaya pero tsaka ganun ganito ganyan sana nako hala uy "
+    "namin natin akin iyo kanya dapat kailangan marami konti sobra mas pinaka".split())
+TAGALOG_SURE = frozenset(
+    "salamat sige kamusta kumusta opo bakit talaga grabe sino saan nasan pagod gutom "
+    "naman kasi yung hindi wala meron pwede mamaya kanina ngayon".split())
+
+
+def is_tagalog(said: str) -> bool:
+    words = re.findall(r"[a-zñ'-]+", (said or "").lower())
+    hits = {w for w in words if w in TAGALOG_WORDS}
+    if len(hits) >= 2:
+        return True
+    return len(words) <= 4 and any(w in TAGALOG_SURE for w in words)
+
+
 class Router:
     """Picks a tier for each request and an engine for each tier."""
 
@@ -274,6 +297,14 @@ class Router:
     # ------------------------------------------------------------- tiering
     def tier(self, prompt: str, local_model: str | None, classify=classify_local) -> tuple[str, str]:
         """(tier, how it was decided). 'codex' may come back as a tier when he asked for it."""
+        tier, how = self._tier(prompt, local_model, classify)
+        # The 3B local model writes broken Tagalog (measured 2026-11-14), so
+        # Tagalog and Taglish small talk goes to Haiku unless he asked for local.
+        if tier == "chat" and how not in ("asked", "empty") and is_tagalog(_clean(prompt)):
+            return "normal", "tagalog"
+        return tier, how
+
+    def _tier(self, prompt: str, local_model: str | None, classify=classify_local) -> tuple[str, str]:
         said = _clean(prompt)
         if not said:
             return "chat", "empty"
