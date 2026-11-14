@@ -3545,6 +3545,12 @@ def main() -> int:
 
     def keep_chats_small() -> None:
         while True:
+            try:
+                # The local model that sorts requests: loaded now and kept
+                # loaded, so sorting costs 0.1 s instead of a 2.5 s timeout.
+                nova_router.keep_warm(nova_harness.local_model())
+            except Exception as exc:          # noqa: BLE001
+                log(f"keep-warm error: {exc}")
             time.sleep(30)
             try:
                 backend.housekeep()

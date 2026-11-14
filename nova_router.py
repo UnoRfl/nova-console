@@ -176,9 +176,41 @@ SCHEMA = {"type": "object", "properties": {"tier": {"type": "string", "enum": li
           "required": ["tier"]}
 
 
+_warm = {"at": 0.0, "busy": False}
+
+
+def keep_warm(model: str | None, url: str = "http://127.0.0.1:11434", every: float = 600) -> None:
+    """Load the local model (and keep it loaded) in the background.
+
+    Warm, the classifier answers in 0.1 s. Cold, it takes 4-5 s to load, the
+    classifier's own timeout gave up first, and giving up CANCELLED the load --
+    so it never did load, and every single request (desk and phone) waited out
+    the 2.5 s timeout before falling back to heuristics. This load is never
+    abandoned, and is repeated before Ollama's keep-alive runs out."""
+    import threading
+    if not model or _warm["busy"] or time.time() - _warm["at"] < every:
+        return
+    _warm["busy"] = True
+
+    def work() -> None:
+        try:
+            body = json.dumps({"model": model, "keep_alive": "60m"}).encode("utf-8")
+            req = urllib.request.Request(url + "/api/generate", data=body,
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=120).read()
+            _warm["at"] = time.time()
+        except Exception:                              # noqa: BLE001 -- Ollama down: try again next time
+            _warm["at"] = time.time() - every + 60
+        finally:
+            _warm["busy"] = False
+    threading.Thread(target=work, daemon=True, name="ollama-warm").start()
+
+
 def classify_local(prompt: str, model: str, url: str = "http://127.0.0.1:11434",
-                   timeout: float = 2.5) -> str | None:
-    """Ask the local model for a tier. None if it is down, slow or says nonsense."""
+                   timeout: float = 0.8) -> str | None:
+    """Ask the local model for a tier. None if it is down, slow or says nonsense.
+    Warm it answers in ~0.1 s; if it has not answered in 0.8 s it is cold, so
+    the rules decide this one and keep_warm() gets it ready for the next."""
     body = json.dumps({
         "model": model, "stream": False, "format": SCHEMA, "keep_alive": "30m",
         "options": {"temperature": 0, "num_predict": 20},
@@ -191,6 +223,8 @@ def classify_local(prompt: str, model: str, url: str = "http://127.0.0.1:11434",
             out = json.loads(r.read().decode("utf-8"))
         tier = json.loads((out.get("message") or {}).get("content") or "{}").get("tier")
     except Exception:                                  # noqa: BLE001
+        _warm["at"] = 0.0                              # cold or gone: load it now, in the background
+        keep_warm(model, url)
         return None
     return tier if tier in TIERS else None
 

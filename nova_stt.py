@@ -34,6 +34,7 @@ _model = None
 _model_name = None
 _lock = threading.Lock()
 _load_error: str | None = None
+_device = ""
 
 
 def config_model() -> str:
@@ -58,19 +59,35 @@ def load(name: str | None = None):
         except ImportError as exc:
             _load_error = f"faster-whisper is not installed: {exc}"
             return None
-        try:
-            # int8 keeps it quick on a CPU without a meaningful accuracy cost
-            # for dictation-length clips, and the default thread count is
-            # conservative -- give it the cores the machine actually has.
-            import os
-            threads = max(4, (os.cpu_count() or 4))
-            _model = WhisperModel(want, device="cpu", compute_type="int8",
-                                  cpu_threads=threads, num_workers=1)
-            _model_name = want
-            _load_error = None
-        except Exception as exc:                      # noqa: BLE001 - report anything
-            _load_error = f"{type(exc).__name__}: {exc}"
-            _model = None
+        import os
+        import numpy as np
+        threads = max(4, (os.cpu_count() or 4))
+        tried = []
+        # The graphics card first: a spoken sentence takes ~0.2 s there against
+        # ~1.8 s on the processor, and on a phone call that wait is felt on
+        # every turn. Loading succeeds even when a CUDA library is missing, so
+        # only a trial run proves the card really works; else the processor.
+        for dev in ("cuda", "cpu"):
+            try:
+                if dev == "cuda":
+                    site = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
+                    for sub in (site.glob("*/bin") if site.is_dir() else []):
+                        try:
+                            os.add_dll_directory(str(sub))
+                        except OSError:
+                            pass
+                        os.environ["PATH"] = str(sub) + os.pathsep + os.environ.get("PATH", "")
+                model = WhisperModel(want, device=dev, compute_type="float16" if dev == "cuda" else "int8",
+                                     cpu_threads=threads, num_workers=1)
+                segs, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="en", beam_size=1)
+                list(segs)
+                _model, _model_name, _load_error = model, want, None
+                global _device
+                _device = dev
+                return _model
+            except Exception as exc:                  # noqa: BLE001 - report anything
+                tried.append(f"{dev}: {type(exc).__name__}: {str(exc)[:120]}")
+        _load_error, _model = " | ".join(tried), None
         return _model
 
 
@@ -78,6 +95,7 @@ def status() -> dict:
     return {
         "loaded": _model is not None,
         "model": _model_name or config_model(),
+        "device": _device,
         "error": _load_error,
     }
 
@@ -129,6 +147,7 @@ def transcribe(data: bytes) -> dict:
         "bytes": len(data),
         "duration": round(getattr(info, "duration", 0.0), 2),
         "model": _model_name,
+        "device": _device,
     }
 
 
