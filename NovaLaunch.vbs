@@ -39,6 +39,11 @@ On Error GoTo 0
 If Not fso.FileExists(root & "\nova_orb.py") Then orb = True
 
 ' 0 = hidden window. Nova.ps1 start only starts missing pieces.
+' Switched off by him (Nova.ps1 off / the "Nova On-Off" shortcut): leave her
+' off. The mic keeper and the Discord bot below are not part of that switch.
+If fso.FileExists(root & "\OFF") Then
+    bridge = True : ears = True : watch = True : orb = True
+End If
 If Not (bridge And ears And watch And orb) Then
     shell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & root & "\Nova.ps1"" start -Direct", 0, True
 End If

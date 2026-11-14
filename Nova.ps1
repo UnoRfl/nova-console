@@ -5,6 +5,9 @@
         .\Nova.ps1 start       start the bridge and the wake listener
         .\Nova.ps1 stop        stop both
         .\Nova.ps1 restart     stop, then start
+        .\Nova.ps1 off         switch her off and KEEP her off (no auto-start, no self-heal)
+        .\Nova.ps1 on          switch her back on
+        .\Nova.ps1 toggle      flip between those two (the "Nova On-Off" shortcut)
         .\Nova.ps1 model opus  switch which Claude answers (haiku|sonnet|opus)
         .\Nova.ps1 open        open the panel now, without saying anything
         .\Nova.ps1 wake        simulate the wake word (opens and arms the mic)
@@ -20,7 +23,7 @@
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status','start','stop','restart','open','wake','mic','audio','test','dictate','logs','login','install','uninstall','model','orb')]
+    [ValidateSet('status','start','stop','restart','off','on','toggle','open','wake','mic','audio','test','dictate','logs','login','install','uninstall','model','orb')]
     [string]$Command = 'status',
 
     # Second positional, used only by 'model' so far: haiku | sonnet | opus.
@@ -45,6 +48,9 @@ $WatchPs1   = Join-Path $Root 'nova-watch.ps1'
 $BridgePid  = Join-Path $Root 'bridge.pid'
 $WakePid    = Join-Path $Root 'wake.pid'
 $WatchPid   = Join-Path $Root 'watch.pid'
+# While this file exists she is switched off: 'start', the login launcher, the
+# 5-minute task (NovaLaunch.vbs) and the watchdog all leave her alone.
+$OffFlag    = Join-Path $Root 'OFF'
 $TaskBridge = 'Nova-Bridge'
 $TaskWake   = 'Nova-Wake'
 
@@ -116,6 +122,9 @@ function Invoke-Status {
     Write-Host ''
     Write-Host 'N O V A' -ForegroundColor Magenta
     Write-Host '-------'
+    if (Test-Path $OffFlag) {
+        Write-Host '  SWITCHED OFF -- she stays off until:  .\Nova.ps1 on   (or the "Nova On-Off" shortcut)' -ForegroundColor Yellow
+    }
 
     $bridge = Get-TrackedProcess $BridgePid
     $portUp = Test-Port $Port
@@ -326,6 +335,44 @@ function Invoke-Stop {
     if (Test-Path $panel) { Remove-Item $panel -Force -ErrorAction SilentlyContinue }
 }
 
+function Invoke-Off {
+    # The flag goes down FIRST, so a watchdog or 5-minute check that is already
+    # mid-way through reviving her finds it and gives up.
+    [IO.File]::WriteAllText($OffFlag, (Get-Date -Format 'o'))
+    Invoke-Stop
+
+    # Whatever the pid files did not cover: her hands (Chrome driver), the tool
+    # server, a listener started by hand, and the Claude processes under them.
+    # Matched on this folder's own scripts only, so the Discord bot, the mic
+    # keeper and Pocket Nova are left alone.
+    $mine = [regex]::Escape($Root) + '\\(nova_(bridge|ears|orb|hands|tools)\.py|nova-(watch|wake)\.ps1)'
+    try {
+        Get-CimInstance Win32_Process -ErrorAction Stop |
+            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -match $mine } |
+            ForEach-Object { & taskkill.exe /PID $_.ProcessId /T /F 2>&1 | Out-Null }
+    } catch { }
+
+    # Hand the local model's memory back now rather than when its timer runs out.
+    try {
+        $cfg = Get-Content (Join-Path $Root 'config.json') -Raw | ConvertFrom-Json
+        if ($cfg.local_model) {
+            $body = @{ model = [string]$cfg.local_model; keep_alive = 0 } | ConvertTo-Json -Compress
+            [void](Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -Body $body `
+                                     -ContentType 'application/json' -TimeoutSec 5)
+        }
+    } catch { }
+
+    Write-Host ''
+    Write-Host 'NOVA is OFF and will stay off (logins and restarts included).' -ForegroundColor Yellow
+    Write-Host 'Bring her back with:  .\Nova.ps1 on   or the "Nova On-Off" shortcut.'
+}
+
+function Invoke-On {
+    Remove-Item $OffFlag -Force -ErrorAction SilentlyContinue
+    if (-not $Direct -and (Test-InJob)) { Invoke-StartViaTask } else { Invoke-Start }
+    Invoke-Status
+}
+
 function Invoke-Model {
     param([string]$Want)
 
@@ -454,7 +501,17 @@ function Invoke-Logs {
     Write-Host ''
 }
 
+if ($Command -in @('start','restart') -and (Test-Path $OffFlag)) {
+    # Every automatic start lands here (login launcher, 5-minute task, watchdog).
+    if ($Command -eq 'restart') { Invoke-Stop }
+    Write-Host 'NOVA is switched off -- not starting. Turn her on with:  .\Nova.ps1 on' -ForegroundColor Yellow
+    return
+}
+
 switch ($Command) {
+    'off'       { Invoke-Off }
+    'on'        { Invoke-On }
+    'toggle'    { if (Test-Path $OffFlag) { Invoke-On } else { Invoke-Off } }
     'status'    { Invoke-Status }
     'start'     { if (-not $Direct -and (Test-InJob)) { Invoke-StartViaTask } else { Invoke-Start }; Invoke-Status }
     'stop'      { Invoke-Stop }
