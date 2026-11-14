@@ -26,9 +26,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nova_words  # noqa: E402
 
-# "small.en" is the accuracy/speed sweet spot on CPU for English dictation.
-# Override in ~/.nova/config.json with {"whisper_model": "base.en"}.
-DEFAULT_MODEL = "small.en"
+# "small" is the multilingual model: same size as "small.en", English just as
+# good, and it can write the Tagalog he also speaks (measured 2026-11-14 on 22
+# clips: Tagalog word errors 67% -> 14%). nova_words.language_for picks en or tl
+# per clip. Override in ~/.nova/config.json with {"whisper_model": "small.en"}.
+DEFAULT_MODEL = "small"
 
 _model = None
 _model_name = None
@@ -124,9 +126,11 @@ def transcribe(data: bytes) -> dict:
             chunks += [f.to_ndarray().reshape(-1) for f in resampler.resample(None)]
         if not chunks:
             return {"error": "empty_audio", "detail": "No audio could be decoded."}
+        audio = np.concatenate(chunks).astype(np.float32)
+        lang = nova_words.language_for(model, audio, _model_name or "")
         segments, info = model.transcribe(
-            np.concatenate(chunks).astype(np.float32),
-            language="en",
+            audio,
+            language=lang,
             # Greedy decoding. For short spoken commands it is roughly twice as
             # fast as a beam search and the wording comes out the same.
             beam_size=1,
@@ -135,7 +139,7 @@ def transcribe(data: bytes) -> dict:
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 400},
             condition_on_previous_text=False,
-            initial_prompt=nova_words.prompt(),       # Sir's vocabulary (config.json)
+            initial_prompt=nova_words.prompt_for(lang),   # Sir's vocabulary (config.json)
         )
         text = nova_words.fix(" ".join(seg.text.strip() for seg in segments).strip())
     except Exception as exc:                          # noqa: BLE001

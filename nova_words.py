@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".nova" / "config.json"
-BASE_PROMPT = "Hey Nova. Nova, what time is it?"
+BASE_PROMPT = "Hey Nova. Nova, what time is it? Nova, open Spotify and turn the volume down."
 MAX_WORDS = 40
 _cache = {"at": 0.0, "cfg": {}}
 
@@ -50,8 +50,46 @@ def vocabulary() -> list[str]:
 
 
 def prompt(base: str = BASE_PROMPT) -> str:
+    # Vocabulary first, ordinary sentences LAST: Whisper copies the style of the
+    # end of its prompt. Ending on the list of CamelCase names made the
+    # multilingual model write "Nova, OpenSpotify, and PlayMyLikeSongs."
     words = vocabulary()
-    return base + (" Words Sir uses: " + ", ".join(words) + "." if words else "")
+    return ("Words Sir uses: " + ", ".join(words) + ". " if words else "") + base
+
+
+TAGALOG_PROMPT = "Hey Nova. Nova, anong oras na? Nova, buksan mo yung Spotify tapos hinaan mo yung volume."
+
+
+def language_for(model, audio, model_name: str = "") -> str:
+    """Which language to transcribe this clip in: English unless it is clearly Tagalog.
+
+    He speaks English, Tagalog and Taglish to her. Whisper told to write English
+    turns Tagalog into nonsense ("books and my own Spotify"), and left to guess
+    among all its languages it calls short clips Indonesian or Spanish, so the
+    choice is only ever between the configured ones (config "stt_languages",
+    default en + tl), and English wins unless the other is the likelier AND at
+    least an even bet. An English-only model ("small.en") always gets "en".
+    """
+    if str(model_name).endswith(".en"):
+        return "en"
+    langs = [x for x in (_cfg().get("stt_languages") or ["en", "tl"]) if isinstance(x, str) and x]
+    if len(langs) < 2:
+        return (langs or ["en"])[0]
+    try:
+        if audio is None or len(audio) < 4800:        # under 0.3 s: nothing to judge
+            return langs[0]
+        _lang, _p, probs = model.detect_language(audio)
+        probs = dict(probs)
+    except Exception:                                 # noqa: BLE001 - never lose the sentence over this
+        return langs[0]
+    best = max(langs, key=lambda x: probs.get(x, 0.0))
+    if best != langs[0] and probs.get(best, 0.0) < 0.5:
+        return langs[0]
+    return best
+
+
+def prompt_for(lang: str) -> str:
+    return prompt() if lang == "en" else prompt(TAGALOG_PROMPT)
 
 
 def fix(text: str) -> str:

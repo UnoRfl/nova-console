@@ -58,7 +58,7 @@ RATE = 16000
 WINDOW = 512                          # Silero's frame at 16 kHz
 
 DEFAULTS = {
-    "whisper_model": "small.en",
+    "whisper_model": "small",         # multilingual: he speaks Tagalog to her too ("small.en" = English only)
     "whisper_device": "auto",         # auto = GPU if it loads, else CPU
     "speaker_threshold": 0.45,        # cosine similarity needed to count as you
     "speaker_threshold_short": 0.38,  # for clips under 1.2 s, which score lower
@@ -250,13 +250,16 @@ class Whisper:
 
     def transcribe(self, samples: np.ndarray) -> tuple[str, float]:
         began = time.time()
+        # English, or Tagalog when that is plainly what he spoke (multilingual
+        # model only; an ".en" model always answers "en").
+        lang = nova_words.language_for(self.model, samples, self.name)
         segs, _ = self.model.transcribe(
-            samples, language="en", beam_size=1,
+            samples, language=lang, beam_size=1,
             condition_on_previous_text=False,
             # Bias the spelling of her name; without it "Nova" comes out as
             # "Noah" or "no va" often enough to matter. nova_words adds Sir's
             # own vocabulary (config "vocabulary"), so NVIDIA is not "Envije".
-            initial_prompt=nova_words.prompt(),
+            initial_prompt=nova_words.prompt_for(lang),
             no_speech_threshold=0.6,
         )
         parts = []
