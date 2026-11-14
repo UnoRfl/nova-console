@@ -725,6 +725,19 @@ def ensure_hands() -> dict:
     return {"error": "nova_hands did not come up within 10 s"}
 
 
+def bridge_names() -> set:
+    """The host names this bridge answers to: loopback, and this PC's tailnet
+    name as `tailscale serve` published it (phone-url.txt)."""
+    names = {"127.0.0.1", "localhost", "::1"}
+    try:
+        m = re.match(r"https?://([^/:]+)", (ROOT / "phone-url.txt").read_text(encoding="utf-8").strip())
+        if m:
+            names.add(m.group(1).lower())
+    except OSError:
+        pass
+    return names
+
+
 def owner_login(login: str) -> bool:
     """Is this Tailscale identity Sir himself? config "owner_logins" lists his
     Tailscale login(s). Tailscale sets the header and the device cannot forge it."""
@@ -743,6 +756,10 @@ def owner_login(login: str) -> bool:
 # nova_tools.approve refuses risky PC actions while it is set.
 TAINT = {"at": 0.0, "source": ""}
 TAINT_TTL = 15 * 60
+
+
+def tainted_now() -> bool:
+    return bool(TAINT["at"]) and time.time() - TAINT["at"] < TAINT_TTL
 
 
 # A reply that carries something for the projector stage.
@@ -1082,6 +1099,11 @@ def persona_file(cfg: dict) -> str:
     return str(path)
 
 
+SECRET_READS = [f"{tool}({path})" for tool in ("Read", "Grep", "Glob") for path in (
+    "~/.ssh/**", "~/.aws/**", "~/.gnupg/**", "~/.nova/token", "~/.nova/url.txt", "~/.nova/*.key",
+    "~/.nova/voiceprint.npy", "~/.nova/telegram.json", "~/.nova/caller/**", "~/.git-credentials")]
+
+
 def claude_args(cfg: dict) -> list[str]:
     """Arguments for one long-lived Claude process.
 
@@ -1148,6 +1170,10 @@ def claude_args(cfg: dict) -> list[str]:
         args += ["--allowedTools"] + [t for t in READ_TOOLS if not t.startswith("Web")]
         args += nova_tool_names("free")
         args += ["--permission-prompt-tool", "mcp__nova__approve"]
+        # Read/Grep/Glob never reach approve() (they are pre-allowed), so keys
+        # and the bridge token are denied to them here, by rule. Tested: the
+        # CLI answers these with a refusal, on Windows paths too.
+        args += ["--disallowedTools"] + SECRET_READS
     else:
         # Read-only: the built-in reading tools plus Nova's own tools that only
         # look, or make small reversible changes (volume, media keys).
@@ -2059,7 +2085,12 @@ class Backend:
                 text, remembered = REMEMBER_PATTERN.sub("", text).strip(), []
                 text, _, _ = nova_initiative.harvest_loops(text, store=False)
             else:
-                text, remembered = harvest_memories(text)
+                if tainted_now():
+                    # approve() refuses the remember tool while tainted; the
+                    # [[remember:]] marker in her reply was the way round it.
+                    text, remembered = REMEMBER_PATTERN.sub("", text).strip(), []
+                else:
+                    text, remembered = harvest_memories(text)
                 text, opened, closed = nova_initiative.harvest_loops(text)
                 for item in opened:
                     log(f"loop opened: {item[:120]}")
@@ -2168,14 +2199,45 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def allowed_host(self) -> bool:
+        """Is this request addressed to the bridge by one of ITS names?
+
+        A web page cannot choose the Host header. Without this check a page on
+        some other site that re-points its own name at 127.0.0.1 (DNS
+        rebinding) talks to the bridge as if it were the same site, and could
+        send the Tailscale-User-Login header itself. Only loopback names and
+        this PC's own tailnet name are answered; Origin, when a browser sends
+        one, must be one of them too."""
+        names = bridge_names()
+        host = (self.headers.get("Host") or "").strip().lower()
+        host = host[1:].split("]")[0] if host.startswith("[") else host.rsplit(":", 1)[0] if ":" in host else host
+        if host not in names:
+            return False
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin and origin != "null":
+            o = re.sub(r"^[a-z]+://", "", origin)
+            o = o[1:].split("]")[0] if o.startswith("[") else o.split(":", 1)[0]
+            if o not in names:
+                return False
+        return True
+
+    def refuse_host(self) -> bool:
+        if self.allowed_host():
+            return False
+        log(f"REFUSED request for {self.path.split('?', 1)[0][:40]}: Host {self.headers.get('Host', '')[:60]!r}, "
+            f"Origin {self.headers.get('Origin', '')[:60]!r} is not this bridge")
+        self.send_text(b"Forbidden: this is not the address of the bridge.", "text/plain; charset=utf-8", 403)
+        return True
+
     def authorized(self) -> bool:
         token = self.server.token
-        if secrets.compare_digest(self.headers.get("X-Nova-Token", ""), token):
+        given = self.headers.get("X-Nova-Token", "")
+        if given.isascii() and secrets.compare_digest(given, token):
             return True
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         for part in query.split("&"):
             if part.startswith("token="):
-                return secrets.compare_digest(part[6:], token)
+                return part[6:].isascii() and secrets.compare_digest(part[6:], token)
         return False
 
     # What a device reaching the bridge through Tailscale may touch. Anything
@@ -2192,6 +2254,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         route = self.path.split("?", 1)[0]
+        if self.refuse_host():
+            return
 
         if self.remote() and route not in self.REMOTE_GET:
             self.send_text(b"Not available remotely.", "text/plain; charset=utf-8", 403)
@@ -2469,6 +2533,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post(self) -> None:
         route = self.path.split("?", 1)[0]
+        if self.refuse_host():
+            return
         if not self.authorized():
             self.send_json({"error": "forbidden"}, 403)
             return
@@ -3020,8 +3086,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif CHANNELS.get(channel, "public") == "owner":
                     channel = "phone"
             profile = CHANNELS.get(channel, "public")
-            if profile == "owner":
-                TAINT.update(at=0.0, source="")       # he has spoken in his own words again
+            if profile == "owner" and not getattr(self.server, "turns", 0):
+                # He has spoken in his own words again. NOT while another of
+                # his requests is still being worked on: a "thanks" arriving
+                # mid-turn used to lift the hold for the turn that read the page.
+                TAINT.update(at=0.0, source="")
             log(f"ask[{channel}]: {prompt[:110]}")
             if profile == "owner":
                 self.in_turn = True                   # released in do_POST
@@ -3041,7 +3110,11 @@ class Handler(BaseHTTPRequestHandler):
 
             # "Hide" / "come back" / "lock the orb" are about her own indicator
             # on screen: done here, at once, with no model in the loop.
-            orb = orb_command(prompt)
+            # Everything from here to the model changes something at the desk
+            # (orb, panel, Spotify, memory, routines, reminders): Sir only. A
+            # guest on the tailnet or Pocket Nova may look and ask, no more.
+            desk = profile == "owner"
+            orb = orb_command(prompt) if desk else None
             if orb:
                 try:
                     set_orb(**ORB_CHANGE[orb])
@@ -3091,7 +3164,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             pc = panel_command(prompt, time.time() - self.server.panel_seen < 6
-                                       or channel == "panel")
+                                       or channel == "panel") if desk else None
             if pc:
                 action, where = pc
                 with self.server.projection_lock:
@@ -3127,7 +3200,7 @@ class Handler(BaseHTTPRequestHandler):
             # model needed, and the reply is what Spotify actually shows playing.
             # "pause the spotify" / "play it now" / "skip this song": no model either
             # (each of these used to cost a 3-turn Haiku round trip).
-            ctl = nova_spotify.parse_control(prompt) if nova_spotify else None
+            ctl = nova_spotify.parse_control(prompt) if (nova_spotify and desk) else None
             if ctl:
                 log(f"spotify control (no model): {ctl}")
                 self.server.activity.push("system", "Spotify", ctl)
@@ -3139,7 +3212,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "memories": len(load_memories(limit=10_000))})
                 return
 
-            music = nova_spotify.parse_request(prompt) if nova_spotify else None
+            music = nova_spotify.parse_request(prompt) if (nova_spotify and desk) else None
             if music:
                 query, kind = music
                 log(f"spotify (no model): {kind} {query[:80]}")
@@ -3154,8 +3227,8 @@ class Handler(BaseHTTPRequestHandler):
 
             # An outright "remember X" is filed here rather than left to the
             # model to mark up, so an explicit instruction is never dropped.
-            noted = remember_from_prompt(prompt)
-            forgotten = forget_from_prompt(prompt)
+            noted = remember_from_prompt(prompt) if desk else []
+            forgotten = forget_from_prompt(prompt) if desk else []
             for fact in forgotten:
                 log(f"forgot: {fact[:120]}")
                 self.server.activity.push("remember", "Forgot", fact[:120])
@@ -3164,7 +3237,7 @@ class Handler(BaseHTTPRequestHandler):
             # round trip to a model. If it contains an "ask" step, that
             # becomes the request and carries on below.
             events = self.server.events
-            routine = nova_events.match_routine(prompt)
+            routine = nova_events.match_routine(prompt) if desk else None
             if routine:
                 ran = events.run_routine(routine, collect_asks=True)
                 log(f"routine {routine}: done {ran.get('done')} skipped {ran.get('skipped')}")
@@ -3181,7 +3254,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # "Remind me ..." is likewise handled here, so a reminder never
             # depends on the model deciding to set one.
-            m = REMIND_ME.match(prompt)
+            m = REMIND_ME.match(prompt) if desk else None
             import nova_when
             parsed = nova_when.parse(prompt) if m else None
             # Only with a clock time named: "remind me to tell mom about Saturday"
@@ -3744,6 +3817,7 @@ def main() -> int:
     httpd.events = nova_events.Events(announce=announce, ask=ask_and_speak, activity=activity,
                                       check=silent_check, jobs=httpd.jobs, notify=notify_away,
                                       judge=silent_judge)
+    httpd.events.log = log                 # a failing check is written down, once, instead of vanishing
     httpd.notes = nova_extras.Notes(announce=lambda t: httpd.events.announce(t, push=True), log=log)
 
     def telegram_ask(prompt: str) -> dict:

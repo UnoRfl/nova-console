@@ -142,7 +142,8 @@ class Usage:
                                 "today's Claude allowance.")
                         break
             try:
-                USAGE_FILE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+                import nova_safe
+                nova_safe.write_json(USAGE_FILE, data, indent=1)
             except OSError:
                 pass
             return warn
@@ -211,9 +212,17 @@ def ensure_ollama() -> bool:
         return False
     _serve_tried["at"] = time.time()
     try:
+        # A console of its own, hidden -- NOT "no console". Ollama starts a
+        # console program (its model runner) every time a model is loaded;
+        # with no console to inherit, Windows gave each runner a fresh one and
+        # a Windows Terminal window flashed up on Sir's screen on every
+        # request that woke the local model. A hidden console is inherited.
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0                            # SW_HIDE
         subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, close_fds=True,
-                         creationflags=0x08000000 | 0x00000008 | 0x00000200)  # no window, detached, new group
+                         stderr=subprocess.DEVNULL, close_fds=True, startupinfo=si,
+                         creationflags=0x00000010 | 0x00000200)   # new (hidden) console, new group
     except OSError:
         return False
     _local_cache["at"] = 0.0                          # look again on the next request
@@ -301,7 +310,8 @@ class Jobs:
     def _save(self) -> None:
         try:
             keep = dict(sorted(self.jobs.items(), key=lambda kv: kv[1]["started"])[-40:])
-            JOBS_FILE.write_text(json.dumps(keep, indent=1), encoding="utf-8")
+            import nova_safe
+            nova_safe.write_json(JOBS_FILE, keep, indent=1)
         except OSError:
             pass
 

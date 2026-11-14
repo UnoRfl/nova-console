@@ -57,10 +57,43 @@ def _window(name: str = ""):
     raise LookupError(f"no open window matches {name!r}; list_windows shows what is open")
 
 
+# Anything by Meta is read-only for her, in ANY window: the WhatsApp app, and
+# Messenger / Facebook / Instagram / Threads / WhatsApp Web open in one of his
+# browsers. Matched on the window title, which for a browser is the tab's.
+META_TITLE = re.compile(r"\b(whatsapp|messenger|facebook|instagram)\b|(?:^|[•|]\s*)(threads)\s*(?:$|[-–—|•])", re.I)
+
+
+def meta_window(title: str, exe: str = "") -> str:
+    """The Meta product a window is showing ('' if none)."""
+    if (exe or "").lower().startswith("whatsapp"):
+        return "WhatsApp"
+    m = META_TITLE.search(title or "")
+    return (m.group(1) or m.group(2)).title() if m else ""
+
+
+def foreground_title() -> str:
+    import ctypes
+    u = ctypes.windll.user32
+    buf = ctypes.create_unicode_buffer(512)
+    u.GetWindowTextW(u.GetForegroundWindow(), buf, 512)
+    return buf.value
+
+
 def _guard(win, what: str) -> None:
-    if READ_ONLY_APPS.match((win.Name or "").strip()):
-        raise PermissionError(f"{what} refused: {win.Name} is read-only for Nova. Use whatsapp_chats / "
-                              "whatsapp_read to read it; she never types or clicks there.")
+    name = (win.Name or "").strip()
+    meta = meta_window(name)
+    if READ_ONLY_APPS.match(name) or meta:
+        raise PermissionError(f"{what} refused: {meta or name} is read-only for Nova (anything by Meta is, by "
+                              "Sir's rule). Use whatsapp_chats / whatsapp_read / messenger_read to read it; "
+                              "she never types or clicks there.")
+
+
+def _guard_point(x, y, what: str) -> None:
+    """A click by screen position lands on whatever is THERE now, which may not
+    be the window that was looked at. Check the window under the point."""
+    ctrl = _auto().ControlFromPoint(int(x), int(y))
+    if ctrl:
+        _guard(ctrl.GetTopLevelControl(), what)
 
 
 def look(window: str = "", limit: int = 80) -> str:
@@ -121,6 +154,7 @@ def click(target: str, window: str = "", double: bool = False, right: bool = Fal
         win.SetActive()
         ctrl, xy = _find(win, target)
         if xy:
+            _guard_point(*xy, "Clicking")
             fn = auto.RightClick if right else (auto.DoubleClick if double else auto.Click)
             fn(*xy)
             label = f"[{target}]"
@@ -154,6 +188,7 @@ def set_text(target: str, text: str, window: str = "", enter: bool = False) -> s
         win.SetActive()
         ctrl, xy = _find(win, target)
         if xy:
+            _guard_point(*xy, "Typing")
             auto.Click(*xy)
             auto.SendKeys("{Ctrl}a", waitTime=0.05)
             auto.SendKeys(text.replace("{", "{{}").replace("}", "{}}"), interval=0.005, waitTime=0.1)

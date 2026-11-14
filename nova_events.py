@@ -116,14 +116,17 @@ class Reminders:
         self.lock = threading.Lock()
 
     def _load(self) -> list[dict]:
-        try:
-            return json.loads(REMINDERS_FILE.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        import nova_safe
+        data = nova_safe.read_json(REMINDERS_FILE, [])
+        # One malformed entry must not stop every other reminder (and, through
+        # the tick loop, everything else she does on her own).
+        return [i for i in data if isinstance(i, dict) and i.get("id") and "text" in i
+                and isinstance(i.get("at"), (int, float))] if isinstance(data, list) else []
 
     def _save(self, items: list[dict]) -> None:
+        import nova_safe
         try:
-            REMINDERS_FILE.write_text(json.dumps(items, indent=1), encoding="utf-8")
+            nova_safe.write_json(REMINDERS_FILE, items, indent=1)
         except OSError:
             pass
 
@@ -806,46 +809,72 @@ class Events:
 
     def loop(self) -> None:
         tick = 0
+        self._errors: dict = {}
+        self._log = getattr(self, "log", None)
         while True:
-            try:
+            # Each check stands alone: one that throws (a bad rule, a site that
+            # is down) used to skip every check after it, on every tick, for good.
+            def step(fn, *args) -> None:
+                try:
+                    fn(*args)
+                except Exception as exc:              # noqa: BLE001 -- never let the loop die
+                    name = getattr(fn, "__name__", "check")
+                    msg = f"{name}: {type(exc).__name__}: {exc}"[:160]
+                    if self._errors.get(name) != msg:           # say it once, not every ten seconds
+                        self._errors[name] = msg
+                        if self.activity:
+                            self.activity.push("system", "Events error", msg)
+                        if self._log:
+                            self._log("events: " + msg)
+
+            def reminders_due() -> None:
                 for item in self.reminders.due():
-                    if item.get("kind") == "ask" and self._ask:
-                        self._ask(item["text"])
-                    else:
-                        self.announce("Sir, a reminder: " + item["text"], urgent=True)
-                self.check_presence()
-                self.check_classes()
-                self.flush_held()
-                self.check_orders()
-                self.narrate_jobs()
-                if not TESTING:                       # a test bridge never briefs, nags or reads his mail
-                    self.check_rules()
-                    self.check_arrival()
-                    if tick % 3 == 1:                 # every half minute
-                        self.check_follow_up()
+                    try:
+                        if item.get("kind") == "ask" and self._ask:
+                            self._ask(item["text"])
+                        else:
+                            self.announce("Sir, a reminder: " + item["text"], urgent=True)
+                    except Exception as exc:          # noqa: BLE001 -- the rest of the batch still goes out
+                        if self._log:
+                            self._log(f"events: reminder {item.get('id')} not delivered: {exc}")
+
+            def stack() -> None:
+                import nova_tools
+                self.check_stack(nova_tools.server_status())
+
+            step(reminders_due)
+            step(self.check_presence)
+            step(self.check_classes)
+            step(self.flush_held)
+            step(self.check_orders)
+            step(self.narrate_jobs)
+            if not TESTING:                           # a test bridge never briefs, nags or reads his mail
+                step(self.check_rules)
+                step(self.check_arrival)
+                if tick % 3 == 1:                     # every half minute
+                    step(self.check_follow_up)
+            try:
                 c = cfg()
-                if tick % 12 == 0:                    # every two minutes
-                    if c["watch_minecraft"]:
-                        self.check_minecraft()
-                    elif c["watch_headless"]:
-                        import nova_tools
-                        self.check_stack(nova_tools.server_status())
-                    if c["watch_disk"]:
-                        self.check_disk()
-                    if c["watch_gpu"]:
-                        self.check_gpu()
-                    self.check_briefing()
-                    self.check_school()
-                    if not TESTING:
-                        self.check_health()
-                        self.check_pages()
-                if tick % 60 == 30:                   # every ten minutes
-                    self.check_prs()
-                    if not TESTING:
-                        self.check_projects()
-            except Exception as exc:                  # noqa: BLE001 -- never let the loop die
-                if self.activity:
-                    self.activity.push("system", "Events error", f"{type(exc).__name__}: {exc}"[:160])
+            except Exception:                         # noqa: BLE001
+                c = {}
+            if tick % 12 == 0:                        # every two minutes
+                if c.get("watch_minecraft"):
+                    step(self.check_minecraft)
+                elif c.get("watch_headless"):
+                    step(stack)
+                if c.get("watch_disk"):
+                    step(self.check_disk)
+                if c.get("watch_gpu"):
+                    step(self.check_gpu)
+                step(self.check_briefing)
+                step(self.check_school)
+                if not TESTING:
+                    step(self.check_health)
+                    step(self.check_pages)
+            if tick % 60 == 30:                       # every ten minutes
+                step(self.check_prs)
+                if not TESTING:
+                    step(self.check_projects)
             tick += 1
             time.sleep(10)
 

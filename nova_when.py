@@ -62,6 +62,16 @@ def _clean(text: str) -> str:
     t = re.sub(r"[,;!?]", " ", t)
     t = re.sub(r"(\d)\s*\.\s*(\d{2})\s*(am|pm|a\.m\.|p\.m\.)", r"\1:\2 \3", t)     # 9.30 pm
     t = t.replace("a.m.", "am").replace("p.m.", "pm")
+    t = re.sub(r"\b(at|by|around)\s+(\d{1,2})\.(\d{2})\b", r"\1 \2:\3", t)              # at 9.30
+    t = re.sub(r"\b(\d{1,2})\s*o'?\s?clock\b", r"at \1", t)                              # 3 o'clock
+    for w, n in (("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6), ("seven", 7),
+                 ("eight", 8), ("nine", 9), ("ten", 10), ("eleven", 11), ("twelve", 12)):
+        t = re.sub(r"\b(half past|quarter past|quarter to|quarter of|at|by|around)\s+" + w + r"\b(?!\s+(?:minutes?|hours?|days?|weeks?))",
+                   r"\1 " + str(n), t)
+    t = re.sub(r"\bhalf past\s+(\d{1,2})\b", lambda m: f"{int(m.group(1))}:30", t)
+    t = re.sub(r"\b(?:a\s+)?quarter past\s+(\d{1,2})\b", lambda m: f"{int(m.group(1))}:15", t)
+    t = re.sub(r"\b(?:a\s+)?quarter (?:to|of)\s+(\d{1,2})\b", lambda m: f"{(int(m.group(1)) - 2) % 12 + 1}:45", t)
+    t = re.sub(r"\bat\s+at\b", "at", t)
     return " ".join(t.split())
 
 
@@ -91,6 +101,22 @@ def _relative(t: str, now: float) -> float | None:
     return now + total
 
 
+AMBIGUOUS: set = set()      # clock times read with no am/pm and no daypart, this call
+
+_NIGHT = r"tonight|night|midnight|gabi"
+_PM = r"afternoon|evening|hapon|noon|midday|tanghali"
+_AM = r"morning|umaga"
+
+
+def _daypart(before: str, after: str) -> str:
+    """'night' / 'pm' / 'am' when such a word is attached to the clock time."""
+    for name, words in (("night", _NIGHT), ("pm", _PM), ("am", _AM)):
+        if re.search(r"\b(?:" + words + r")\s*$", before) or \
+                re.match(r"\s*(?:in the|this|at|ng|sa)?\s*(?:" + words + r")\b", after):
+            return name
+    return ""
+
+
 def _time_of_day(t: str) -> tuple[int, int] | None:
     m = re.search(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b", t)
     if not m:
@@ -105,9 +131,18 @@ def _time_of_day(t: str) -> tuple[int, int] | None:
             h = 0
         if h > 23 or mi > 59:
             return None
-        # "at 7 tonight" / "at 5 in the afternoon"
-        if not ap and h < 12 and re.search(r"\b(?:tonight|evening|afternoon|night|pm|gabi|hapon)\b", t):
-            h += 12
+        if not ap and h <= 12:
+            # "at 7 tonight" / "tonight at 7" / "at 5 in the afternoon". The word
+            # must sit NEXT TO the time: "at 7 submit the afternoon report" is 07:00.
+            part = _daypart(t[:m.start()], t[m.end():])
+            if part == "night":
+                h = 0 if h == 12 else h + 12 if h >= 5 else h      # tonight at 12 / at 1 = after midnight
+            elif part == "pm" and h < 12:
+                h += 12
+            elif part == "am" and h == 12:
+                h = 0
+            elif not part and 1 <= h <= 11 and not m.group(2):     # "at 5"; a written 9:30 stays as written
+                AMBIGUOUS.add((h, mi))                             # parse() picks am or pm by what is still ahead
         return h, mi
     for word, hm in (("noon", (12, 0)), ("midday", (12, 0)), ("tanghali", (12, 0)), ("midnight", (0, 0)),
                      ("morning", (8, 0)), ("umaga", (8, 0)), ("afternoon", (14, 0)), ("hapon", (14, 0)),
@@ -128,9 +163,12 @@ def _date(t: str, now: float) -> tuple[int, int, int] | None:
     m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", t)
     if m:
         return int(m.group(1)), int(m.group(2)), int(m.group(3))
-    year = re.search(r"\b(20\d{2})\b", t)
+    # Sun/Sat/"linggo" (also "week") only count as days after on/next/this/every.
+    t = re.sub(r"(?<!\bon )(?<!\bnext )(?<!\bthis )(?<!\bevery )\b(?:sun|sat|linggo)\b", " ", t)
     m = (re.search(r"\b" + ORD + r"\s+(?:of\s+|ng\s+)?(" + MONTH_RE + r")\.?\b", t)
          or None)
+    # A year counts only right beside the date: "november 16 pay 2000 pesos" is not the year 2000.
+    year = None
     day = mon = None
     if m:
         day, mon = int(m.group(1)), MONTHS[m.group(2)]
@@ -138,6 +176,8 @@ def _date(t: str, now: float) -> tuple[int, int, int] | None:
         m = re.search(r"\b(" + MONTH_RE + r")\.?\s+(?:the\s+)?" + ORD + r"\b(?!\s*(?::|am|pm|minutes?|hours?))", t)
         if m:
             mon, day = MONTHS[m.group(1)], int(m.group(2))
+    if m:
+        year = re.match(r"\s*(20[2-9]\d)\b(?!\s*(?:pesos?|php|dollars?|usd|pcs|pieces|words|\w*s\b))", t[m.end():])
     if day and mon:
         y = int(year.group(1)) if year else y0
         if not year and (mon, day) < (m0, d0):
@@ -152,25 +192,37 @@ def _date(t: str, now: float) -> tuple[int, int, int] | None:
     m = re.search(r"\bin\s+" + NUM + r"\s*(day|week)s?\b", t)
     if m:
         return ahead(int(round(_num(m.group(1)) * (7 if m.group(2) == "week" else 1))))
-    if re.search(r"\b(?:next week|in a week)\b", t):
-        return ahead(7)
-    m = re.search(r"\b(next|this|coming|on)?\s*(" + DAY_RE + r")\b", t)
-    if m:
-        want = WEEKDAYS[m.group(2)]
-        diff = (want - lt.tm_wday) % 7
-        if m.group(1) == "next" and diff == 0:
-            diff = 7
-        return ahead(diff)                            # today counts if the time is still ahead
+    wd = re.search(r"\b(next|this|coming|on)?\s*(" + DAY_RE + r")\b", t)
+    next_week = re.search(r"\b(?:next week|in a week)\b", t)
+    if next_week and wd:                              # "next week monday" / "monday next week"
+        return ahead(7 - lt.tm_wday + WEEKDAYS[wd.group(2)])
+    # "the 27th" / "on 27th" beats a weekday said with it: "friday the 27th" is the 27th.
     m = re.search(r"\b(?:on\s+)?the\s+" + r"(\d{1,2})(?:st|nd|rd|th)\b", t) or \
         re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)\b", t)
-    if m:
-        day = int(m.group(1))
+    next_month = re.search(r"\bnext month\b", t)
+    if m or next_month:
+        day = int(m.group(1)) if m else d0
         y, mo = y0, m0
-        if day < d0:
+        if next_month or day < d0:
             mo += 1
+        for _ in range(12):                           # "the 31st" in a 30-day month: the next month that has one
             if mo > 12:
                 y, mo = y + 1, 1
-        return (y, mo, day) if _valid(y, mo, day) else None
+            if _valid(y, mo, day):
+                return y, mo, day
+            if next_month and not m:
+                day -= 1                              # "next month" said on the 31st: its last day
+            else:
+                mo += 1
+        return None
+    if next_week:
+        return ahead(7)
+    if wd:
+        want = WEEKDAYS[wd.group(2)]
+        diff = (want - lt.tm_wday) % 7
+        if wd.group(1) == "next" and diff == 0:
+            diff = 7
+        return ahead(diff)                            # today counts if the time is still ahead
     return None
 
 
@@ -182,25 +234,40 @@ def parse(text: str, now: float | None = None) -> dict | None:
     rel = _relative(t, now)
     if rel is not None:
         return {"at": rel, "daily": "", "weekly": None, "dated": False, "timed": True}
+    # Repeats the reminder store cannot hold (it knows daily and one weekday)
+    # are not guessed at: better no reminder than one that fires once and stops.
+    if re.search(r"\bevery\s+(?:week ?day|weekend|other|second|third|\d+|two|three|month|year|hour)", t) \
+            or len(re.findall(r"\b(?:" + DAY_RE + r")\b", t)) > 1 and re.search(r"\bevery\b", t):
+        return None
     daily = bool(re.search(r"\b(?:every ?day|daily|each day|every morning|every night|every evening|araw-araw)\b", t))
     wk = re.search(r"\bevery\s+(" + DAY_RE + r")\b", t)
     weekly = WEEKDAYS[wk.group(1)] if wk else None
     date = _date(t, now)
+    AMBIGUOUS.clear()
     hm = _time_of_day(t)
+    # "at 5": morning or afternoon was not said. A repeat is taken as written.
+    unsure = hm in AMBIGUOUS and not daily and weekly is None
     if date is None and hm is None:
         return None
+    tonight = bool(re.search(r"\b(?:tonight|mamayang gabi)\b", t))
     if date is None:                                  # a time alone: the next time it comes round
         lt = time.localtime(now)
         at = _mk(lt.tm_year, lt.tm_mon, lt.tm_mday, *hm)
-        if at <= now:
+        if at <= now and unsure and at + 12 * 3600 > now:
+            at += 12 * 3600                           # "at 5" said at 14:00 is 17:00 today, not 05:00 tomorrow
+        elif at <= now:
             at = _mk(*time.localtime(at + 86400)[:3], *hm)
         dated = False
     else:
         h, mi = hm or DEFAULT_TIME
         at = _mk(*date, h, mi)
         dated = True
+        if tonight and hm and h < 5:
+            at = _mk(*time.localtime(at + 86400)[:3], h, mi)      # "tonight at 12" / "at 1" is after midnight
+        elif at <= now and unsure and at + 12 * 3600 > now and time.localtime(at + 12 * 3600)[:3] == tuple(date):
+            at += 12 * 3600                           # "today at 5" said at 14:00
         # A weekday named with a time already gone today means next week.
-        if at <= now and weekly is None and re.search(r"\b(?:" + DAY_RE + r")\b", t) \
+        if at <= now and re.search(r"\b(?:" + DAY_RE + r")\b", t) \
                 and not re.search(r"\b(?:today|tonight)\b", t):
             at += 7 * 86400
     hhmm = time.strftime("%H:%M", time.localtime(at))

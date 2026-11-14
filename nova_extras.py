@@ -87,7 +87,8 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     try:
-        STATE_FILE.write_text(json.dumps(state, indent=1), encoding="utf-8")
+        import nova_safe
+        nova_safe.write_json(STATE_FILE, state, indent=1)
     except OSError:
         pass
 
@@ -420,13 +421,15 @@ WHEN_KINDS = ("app_open", "app_close", "service_down", "service_up", "time", "ba
 def load_rules(path: Path | None = None) -> list[dict]:
     try:
         data = json.loads((path or RULES_FILE).read_text(encoding="utf-8"))
-        return [r for r in data if isinstance(r, dict) and r.get("id")]
+        return [r for r in data if isinstance(r, dict) and r.get("id")
+                and isinstance(r.get("when"), dict) and r["when"].get("kind")]
     except (OSError, ValueError):
         return []
 
 
 def save_rules(rules: list[dict], path: Path | None = None) -> None:
-    (path or RULES_FILE).write_text(json.dumps(rules, indent=1), encoding="utf-8")
+    import nova_safe
+    nova_safe.write_json(path or RULES_FILE, rules, indent=1)
 
 
 def add_rule(name: str, when_kind: str, when_value: str, steps: list[dict], say: str = "",

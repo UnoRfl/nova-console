@@ -87,14 +87,35 @@ def cache_put(key: str, value) -> None:
 
 # ---------------------------------------------------------------------- http
 
+def _blocked(url: str) -> str:
+    """Local services, LAN hosts and files are not "the web": a page that names
+    http://127.0.0.1:8765/... must not get her own bridge read back to it."""
+    import nova_gate
+    return nova_gate.blocked_url(url, strict=True)
+
+
+class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        why = _blocked(newurl)
+        if why:
+            raise ValueError(f"redirect not followed: {why}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_CheckedRedirect)
+
+
 def _open(url: str, data: bytes | None = None, timeout: float = 12) -> tuple[bytes, str, str]:
     """(body, content-type, final url). Raises OSError / ValueError on failure."""
     if not re.match(r"^https?://", url, re.I):
         raise ValueError("only http and https addresses are read")
+    why = _blocked(url)
+    if why:
+        raise ValueError(f"not read: {why}")
     req = urllib.request.Request(url, data=data, headers={
         "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9", "Accept-Encoding": "gzip, deflate"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _OPENER.open(req, timeout=timeout) as r:
         raw = r.read(MAX_BYTES + 1)
         enc = (r.headers.get("Content-Encoding") or "").lower()
         ctype = r.headers.get("Content-Type") or ""
@@ -295,7 +316,7 @@ def fetch(url: str, fresh: bool = False, via_browser=None, timeout: float = 8) -
     if out["paras"] and WALL.search(" ".join(out["paras"])[:600]) and sum(len(p) for p in out["paras"]) < 1500:
         out["paras"] = []                             # a "prove you are human" page is not the page
         err = "the site refused an automated read"
-    if sum(len(p) for p in out["paras"]) < 400 and via_browser:
+    if sum(len(p) for p in out["paras"]) < 400 and via_browser and not _blocked(final or url):
         # Nothing readable without running the page's scripts (or the site
         # refused a plain request): let her browser render it, in the background.
         try:

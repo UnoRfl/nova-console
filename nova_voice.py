@@ -484,7 +484,8 @@ def remember_said(text: str) -> None:
             items = []
         items = (items + [{"at": time.time(), "text": text[:2000]}])[-20:]
         try:
-            SAID_FILE.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+            import nova_safe
+            nova_safe.write_json(SAID_FILE, items, ensure_ascii=False)
         except OSError:
             pass
 

@@ -43,9 +43,22 @@ BRIDGE = "http://127.0.0.1:8765"
 # Sir's rule (2026-11-13): nothing made by Meta is ever written to -- Facebook,
 # Messenger, Instagram, Threads, WhatsApp Web. Gmail can SEND, but only via
 # gmail_send / gmail_reply; generic clicks and typing stay refused there.
-READ_ONLY_HOSTS = re.compile(r"(?:^|\.)(?:messenger\.com|facebook\.com|fb\.com|fbsbx\.com|fb\.me|m\.me|"
-                             r"instagram\.com|threads\.net|threads\.com|whatsapp\.com|whatsapp\.net|meta\.com|"
-                             r"mail\.google\.com|accounts\.google\.com|myaccount\.google\.com)$", re.I)
+_META = (r"messenger\.com|facebook\.com|fb\.com|fbsbx\.com|fb\.me|fb\.watch|fb\.gg|m\.me|wa\.me|"
+         r"instagram\.com|ig\.me|threads\.net|threads\.com|whatsapp\.com|whatsapp\.net|meta\.com|meta\.ai|"
+         r"workplace\.com|oculus\.com")
+META_HOSTS = re.compile(r"(?:^|\.)(?:" + _META + r")$", re.I)
+# Also no generic clicking/typing on Google surfaces that send as him: mail has
+# its own gated tools (gmail_send / gmail_reply); chat and messages have none.
+READ_ONLY_HOSTS = re.compile(r"(?:^|\.)(?:" + _META + r"|mail\.google\.com|accounts\.google\.com|"
+                             r"myaccount\.google\.com|chat\.google\.com|messages\.google\.com|"
+                             r"voice\.google\.com|meet\.google\.com)$", re.I)
+
+
+def _refuse_blocked(url: str) -> None:
+    import nova_gate
+    why = nova_gate.blocked_url(url)
+    if why:
+        raise PermissionError(f"Not opened: {url[:80]} is {why}.")
 
 
 def _port_up(port: int) -> bool:
@@ -317,7 +330,8 @@ class Hands:
             pass
 
     def _guard(self, page, what: str) -> None:
-        if READ_ONLY_HOSTS.search(host(page.url)):
+        _refuse_blocked(page.url)          # never click or type on her own panel, however she got there
+        if READ_ONLY_HOSTS.search(host(page.url).rstrip(".")):
             raise PermissionError(f"{what} refused: {host(page.url)} is read-only for Nova "
                                   "(Meta apps are read-only by Sir's rule; on Gmail use gmail_send / gmail_reply).")
 
@@ -327,7 +341,7 @@ class Hands:
         text = re.sub(r"\n\s*\n+", "\n", text).strip()
         out = {"url": page.url, "title": page.title(), "text": text[:max_chars],
                "truncated": len(text) > max_chars}
-        if mark and not READ_ONLY_HOSTS.search(host(page.url)):
+        if mark and not READ_ONLY_HOSTS.search(host(page.url).rstrip(".")):
             try:
                 out["elements"] = [f"[{n}] {k}: {label}" for n, k, label in page.evaluate(MARK_JS)]
             except Exception:                         # noqa: BLE001
@@ -358,6 +372,7 @@ class Hands:
     def do_open(self, url: str, show: bool = False) -> dict:
         if not re.match(r"^[a-z]+://", url) and not url.startswith(("about:", "chrome:")):
             url = "https://" + url
+        _refuse_blocked(url)
         page = self.page()
         page.goto(url, wait_until="domcontentloaded")
         self._current = page
@@ -373,6 +388,7 @@ class Hands:
         Sir, 2026-11-13: it must never pull him out of a game. The tab is made
         as a BACKGROUND target (Chrome's window is not activated or restored),
         and if focus still moved to her Chrome, it is handed straight back."""
+        _refuse_blocked(url)
         fg_before = _foreground()
         ctx = self.browser()
         page = None
