@@ -1419,7 +1419,7 @@ class Backend:
         try:
             self.proc = subprocess.Popen(
                 claude_args(cfg),
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1, encoding="utf-8", errors="replace",
                 cwd=cfg["workdir"], creationflags=NO_WINDOW, env=claude_env(),
             )
@@ -1482,12 +1482,31 @@ class Backend:
             self.spawn()
 
     def kill(self) -> None:
-        if self.proc and self.proc.poll() is None:
+        proc, self.proc = self.proc, None
+        if proc and proc.poll() is None:
+            # The whole tree: terminate() alone left her MCP server
+            # (nova_tools.py) and any shell it started running as orphans.
             try:
-                self.proc.terminate()
-            except OSError:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
+                               timeout=5, creationflags=NO_WINDOW)
+            except (OSError, subprocess.SubprocessError):
                 pass
-        self.proc = None
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+        if proc:
+            for pipe in (proc.stdin,):                # stdout is left to its reader, which ends at EOF
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        # A turn waiting on this process (killed from another thread: "new
+        # chat" during a voice turn, the idle reaper) is told at once. Its
+        # reader has already been disowned and would never set this, so the
+        # turn used to sit out the full 180 s holding the lock.
+        self.done.set()
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -1661,7 +1680,7 @@ class Backend:
                 and self.cfg.get("brain") != "local" and self.router.enabled())
 
     def busy(self) -> bool:
-        return self.lock.locked() or any(w.lock.locked() for w in self.workers.values())
+        return self.lock.locked() or any(w.lock.locked() for w in list(self.workers.values()))
 
     def worker(self, model: str) -> "Backend":
         """The Claude process for a model: this one for its own model, else a pooled one."""
@@ -1678,12 +1697,17 @@ class Backend:
 
     def reap_workers(self, idle: float = 600) -> None:
         """An idle pooled process costs memory, not tokens; let it go after ten minutes."""
-        for w in self.workers.values():
-            if w.alive() and not w.lock.locked() and time.time() - w.last_used > idle:
-                w.kill()
-                w.session = None
-                w.carry_due = True           # its next chat still gets the thread
-                log(f"stopped idle {w.model} process")
+        for w in list(self.workers.values()):
+            if not w.lock.acquire(blocking=False):
+                continue                     # mid-turn: never pull a process out from under a reply
+            try:
+                if w.alive() and time.time() - w.last_used > idle:
+                    w.kill()
+                    w.session = None
+                    w.carry_due = True       # its next chat still gets the thread
+                    log(f"stopped idle {w.model} process")
+            finally:
+                w.lock.release()
 
     def housekeep(self) -> None:
         """Every half minute: keep chats small without ever making him wait.
@@ -1786,6 +1810,18 @@ class Backend:
                     out = w.ask_claude(note + prompt, arg, True, timeout, speak)
                 if "error" in out:
                     log(f"{key} failed: {out.get('error')}: {str(out.get('detail'))[:200]}")
+                if "error" in out and w.turn_tools:
+                    # She had already run tools when the reply failed (a timeout,
+                    # a dropped connection). The next engine would start the
+                    # whole request again -- send the mail twice, move the file
+                    # twice. Stop here and say so instead.
+                    done = "; ".join(w.turn_trace[-4:])[:300]
+                    log(f"{key} failed after {w.turn_tools} tool call(s); NOT replaying on another engine")
+                    return {"error": out.get("error"), "partial": True, "engine": engine,
+                            "detail": (f"That request stopped part-way, Sir ({out.get('detail') or 'no reply'}). "
+                                       f"I had already done {w.turn_tools} step{'s' if w.turn_tools != 1 else ''}"
+                                       + (f" ({done})" if done else "")
+                                       + ", so I have not started it again. Tell me to carry on if you want the rest.")}
                 if out.get("error") in ("unauthenticated", "no_backend", "spawn_failed"):
                     # Codex is the fallback while Claude is out; keep the outage
                     # short so Claude (and its gate) is back quickly.
@@ -3605,8 +3641,30 @@ def main() -> int:
                 time.sleep(0.25)
             voice.earcon("done")
             time.sleep(0.35)
-            voice.say(text, replace=False)            # never cut across a reply that just began
+            res = voice.say(text, replace=False)      # never cut across a reply that just began
+            if isinstance(res, dict) and res.get("error"):
+                voice_failed(f"{res.get('error')}: {res.get('detail', '')}")
         threading.Thread(target=work, daemon=True).start()
+
+    voice_fail = {"at": 0.0}
+
+    def voice_failed(detail: str) -> None:
+        """She tried to speak and nothing came out. It used to be logged as if
+        it had been said. Write it down, show it, and tell his phone -- at most
+        every ten minutes."""
+        log(f"VOICE FAILED: {detail[:200]}")
+        if time.time() - voice_fail["at"] < 600:
+            return
+        voice_fail["at"] = time.time()
+        activity.push("system", "Voice failed", detail[:160])
+        try:
+            nova_presence.pocket_note("Voice failed: " + detail[:80])
+            notify_away("Nova cannot speak on the PC right now (" + detail[:120] + ").")
+        except Exception as exc:                      # noqa: BLE001
+            log(f"voice failure notice not sent: {exc}")
+
+    if nova_voice:
+        nova_voice.ON_FAILURE = voice_failed
 
     def job_done(job: dict) -> None:
         mins = max(1, round(((job.get("ended") or time.time()) - job["started"]) / 60))

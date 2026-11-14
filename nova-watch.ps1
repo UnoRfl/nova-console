@@ -35,7 +35,11 @@ function Get-Tracked {
     if (-not (Test-Path $PidFile)) { return $null }
     $id = 0
     if (-not [int]::TryParse((Get-Content $PidFile -Raw).Trim(), [ref]$id)) { return $null }
-    return Get-Process -Id $id -ErrorAction SilentlyContinue
+    $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+    # Windows reuses process ids. A pid file left by a dead listener can point
+    # at some unrelated program, which then read as "already running" for ever.
+    if ($p -and $p.ProcessName -notmatch '^(python|pythonw|powershell|pwsh)$') { return $null }
+    return $p
 }
 
 function Test-BridgePort {
@@ -46,6 +50,31 @@ function Test-BridgePort {
         return $true
     } catch { return $false }
 }
+
+# The port being open only proves the process exists. A bridge that has hung
+# still accepts the connection and then never answers; this asks it a question.
+function Test-BridgeAnswers {
+    try {
+        $tok = (Get-Content (Join-Path $Root 'token') -Raw).Trim()
+        $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/api/health")
+        $req.Headers.Add('X-Nova-Token', $tok)
+        $req.Timeout = 8000
+        $req.ReadWriteTimeout = 8000
+        $res = $req.GetResponse()
+        $ok = ([int]$res.StatusCode -eq 200)
+        $res.Close()
+        return $ok
+    } catch { return $false }
+}
+
+function Stop-HungBridge {
+    try {
+        $owner = (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1).OwningProcess
+        if ($owner) { Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue }
+    } catch { }
+}
+
+$silent = 0     # checks in a row where the port was open but the bridge said nothing
 
 # One watchdog, ever. Two would fight each other over the same pid files.
 $existing = Get-Tracked $WatchPid
@@ -69,6 +98,20 @@ try {
         try {
             $missing = @()
             if (-not (Test-BridgePort))      { $missing += 'bridge' }
+            elseif (Test-BridgeAnswers)      { $silent = 0 }
+            else {
+                $silent++
+                if ($silent -ge 3) {
+                    # Three checks (a minute and a half) of an open port and no
+                    # answer: it is hung, not busy. Requests run on their own
+                    # threads, so a long reply never blocks this question.
+                    Write-NovaLog "bridge has not answered for $silent checks -- it is hung; stopping it" 'watch'
+                    Stop-HungBridge
+                    Start-Sleep -Seconds 2
+                    $silent = 0
+                    $missing += 'bridge'
+                }
+            }
             if (-not (Get-Tracked $WakePid)) { $missing += 'wake listener' }
 
             if ($missing.Count -gt 0 -and $backoff -le 0) {

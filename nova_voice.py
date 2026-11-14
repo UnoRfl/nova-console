@@ -83,6 +83,9 @@ ACKS = {
 }
 
 
+ON_FAILURE = None           # set by the bridge: called with a reason when she could not speak
+
+
 def load_cfg() -> dict:
     cfg = dict(DEFAULTS)
     try:
@@ -544,6 +547,7 @@ class SpeechStream:
             began = time.time()
             first_audio = [None]
             spoken = [0]
+            failed: list = []                         # sentences no engine could voice
             audio: queue.Queue = queue.Queue(maxsize=3)
             # This reply's own "stop". A cloud voice cannot be interrupted in
             # the middle of fetching a sentence, so the producer is not waited
@@ -568,9 +572,10 @@ class SpeechStream:
                                 break
                             try:
                                 chunk = v.synth(part, self.voice_name)
-                            except Exception:         # noqa: BLE001
+                            except Exception as exc:  # noqa: BLE001
                                 # One sentence the synthesiser chokes on must
                                 # not silence the rest of the reply.
+                                failed.append(f"{type(exc).__name__}: {exc}"[:120])
                                 continue
                             if first_audio[0] is None:
                                 first_audio[0] = time.time() - began
@@ -599,8 +604,16 @@ class SpeechStream:
                 self.result = {"ok": True, "spoken": spoken[0], "interrupted": interrupted,
                                "first_audio_s": round(first_audio[0] or 0, 2),
                                "total_s": round(time.time() - began, 2)}
+                if failed and not spoken[0] and not interrupted:
+                    # Every sentence failed: that is silence, not "ok, spoken 0".
+                    self.result = {"error": "voice_failed", "detail": failed[-1], "sentences": len(failed)}
             except Exception as exc:                  # noqa: BLE001
                 self.result = {"error": "playback_failed", "detail": f"{type(exc).__name__}: {exc}"}
+            if self.result.get("error") and ON_FAILURE:
+                try:
+                    ON_FAILURE(f"{self.result['error']}: {self.result.get('detail', '')}")
+                except Exception:                     # noqa: BLE001
+                    pass
             dead.set()                                # release the producer either way
             v.stop_flag.set()
             t.join(timeout=0.05)                      # it ends on its own; do not wait on the network

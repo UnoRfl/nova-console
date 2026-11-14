@@ -67,7 +67,11 @@ function Get-TrackedProcess {
     if (-not (Test-Path $PidFile)) { return $null }
     $id = 0
     if (-not [int]::TryParse((Get-Content $PidFile -Raw).Trim(), [ref]$id)) { return $null }
-    return Get-Process -Id $id -ErrorAction SilentlyContinue
+    $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+    # Windows reuses process ids. A pid file left by a dead listener can point
+    # at some unrelated program, which then read as "already running" for ever.
+    if ($p -and $p.ProcessName -notmatch '^(python|pythonw|powershell|pwsh|chrome|msedge|opera)$') { return $null }
+    return $p
 }
 
 function Test-Port {

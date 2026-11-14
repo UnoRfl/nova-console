@@ -573,6 +573,7 @@ class Ears:
         dev = self.cfg.get("input_device")
         first = True
         waiting = False
+        missing_since = told = 0.0
         while True:
             try:
                 if not first:
@@ -594,6 +595,16 @@ class Ears:
                     if not waiting:
                         log(f"pinned mic '{dev}' is not connected -- waiting for it (not switching mics)")
                         waiting = True
+                        missing_since = time.time()
+                        told = 0.0
+                    # Deaf is worse than it sounds: he says "Nova" and nothing
+                    # happens, with no clue why. She can still SPEAK, so after a
+                    # minute she says so (and again every half hour).
+                    if time.time() - missing_since > 60 and time.time() - told > 1800:
+                        told = time.time()
+                        self.bridge._call("/api/announce", {"urgent": True, "text": (
+                            f"Sir, I cannot hear you: the microphone {str(dev).replace(' MME', '')} is not "
+                            "connected. I shall listen again as soon as it is back.")})
                     time.sleep(3)
                     first = False
                     continue
