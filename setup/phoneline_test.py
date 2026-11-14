@@ -102,6 +102,7 @@ line = P.PhoneLine({"host": "127.0.0.1", "port": PORT, "token": TOKEN},
                    transcribe=lambda wav: {"text": next(heard_texts, "")},
                    synth=lambda t: (said.append(t), np.zeros(int(24000 * 0.4), dtype=np.float32))[1],
                    log=logs.append, on_missed=missed.append, on_turn=lambda h, r: turns.append((h, r)))
+line.det = P.Detector()      # this test talks in tones, which the neural detector rightly ignores (see callvad_test.py)
 line.start()
 for _ in range(50):
     if line.ready():

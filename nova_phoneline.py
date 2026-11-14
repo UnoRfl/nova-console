@@ -51,7 +51,9 @@ def to_48k_pcm(audio, rate: int = 24000) -> bytes:
 
 class Detector:
     """Where does he start and stop talking? Energy with a learned noise floor
-    (the same rule the phone page uses), on 20 ms windows."""
+    (the same rule the phone page uses), on 20 ms windows. Only the fallback
+    now, for when the neural detector cannot load; see SpeechDetector."""
+    rate = RATE
 
     def __init__(self, start_ms: int = 120, end_ms: int = 900, min_ms: int = 350, max_s: int = 30) -> None:
         self.start_n, self.end_n, self.min_n, self.max_n = start_ms // 20, end_ms // 20, min_ms // 20, max_s * 50
@@ -97,6 +99,59 @@ class Detector:
         return out
 
 
+class SpeechDetector:
+    """Where he starts and stops talking, by the same neural detector her ears
+    use (Silero), not by loudness.
+
+    Loudness failed on a real call: a phone line is never quiet (the handset's
+    own noise and gain sit above any fixed level), so his pauses were not seen
+    and three attempts at a question arrived as one 20-second utterance.
+    Silero hears speech itself, so a short pause ends the sentence.
+    """
+    rate = 16000
+    WINDOW = 512
+
+    def __init__(self, end_silence: float = 0.55, max_s: float = 30) -> None:
+        import sherpa_onnx
+        from pathlib import Path
+        vc = sherpa_onnx.VadModelConfig()
+        vc.silero_vad.model = str(Path(__file__).resolve().parent / "models" / "silero_vad.onnx")
+        vc.silero_vad.threshold = 0.5
+        vc.silero_vad.min_silence_duration = end_silence
+        vc.silero_vad.min_speech_duration = 0.25
+        vc.silero_vad.max_speech_duration = max_s
+        vc.silero_vad.window_size = self.WINDOW
+        vc.sample_rate = self.rate
+        vc.num_threads = 1
+        self.vad = sherpa_onnx.VoiceActivityDetector(vc, buffer_size_in_seconds=60)
+        self.rest = b""
+        self.buf = np.zeros(0, dtype=np.float32)
+
+    def reset(self) -> None:
+        self.vad.reset()
+        self.rest, self.buf = b"", np.zeros(0, dtype=np.float32)
+
+    def feed(self, pcm: bytes) -> bytes | None:
+        """48 kHz s16 in (any size pieces); one finished utterance out, as 16 kHz s16."""
+        pcm = self.rest + pcm
+        whole = len(pcm) // 6 * 6                         # three samples -> one
+        pcm, self.rest = pcm[:whole], pcm[whole:]
+        if not pcm:
+            return None
+        a = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+        self.buf = np.concatenate([self.buf, a.reshape(-1, 3).mean(axis=1)])      # 48k -> 16k
+        while len(self.buf) >= self.WINDOW:
+            self.vad.accept_waveform(self.buf[:self.WINDOW])
+            self.buf = self.buf[self.WINDOW:]
+        out = None
+        while not self.vad.empty():
+            seg = np.asarray(self.vad.front.samples, dtype=np.float32)
+            self.vad.pop()
+            if len(seg) >= self.rate * 0.3:
+                out = (np.clip(seg, -1, 1) * 32767).astype("<i2").tobytes()
+        return out
+
+
 class PhoneLine:
     def __init__(self, cfg: dict, ask, transcribe, synth, log, on_missed=None, on_turn=None) -> None:
         self.host, self.port, self.token = cfg.get("host"), int(cfg.get("port", 8790)), cfg.get("token", "")
@@ -109,7 +164,12 @@ class PhoneLine:
         self.greeting = ""
         self.speaking_until = 0.0
         self.last_heard = 0.0
-        self.det = Detector()
+        self.last_voice_s, self.det_pause = 0.0, 0.45
+        try:
+            self.det = SpeechDetector(end_silence=self.det_pause)
+        except Exception as exc:                          # noqa: BLE001 -- no model: loudness will have to do
+            log(f"phoneline: neural speech detector unavailable ({exc}); using loudness")
+            self.det = Detector()
         self.rx_bytes, self.rx_peak = 0, 0     # what the call delivered from his side (for the log)
         self.turn_busy = threading.Lock()
         self.stop = threading.Event()
@@ -158,16 +218,34 @@ class PhoneLine:
     # ------------------------------------------------------------ talking
     def say(self, text: str) -> None:
         """Speak into the call; returns when she should be done."""
-        try:
-            pcm = to_48k_pcm(self.synth(text))
-        except Exception as exc:                          # noqa: BLE001
-            self.log(f"phoneline: voice failed: {exc}")
-            return
+        # A sentence at a time: the first is on the line while the rest are
+        # still being voiced. Voicing the whole reply first made him wait for
+        # all of it before hearing a word.
+        parts, cur = [], ""
+        for piece in re.split(r"(?<=[.!?])\s+", " ".join(str(text).split())):
+            cur = (cur + " " + piece).strip()
+            if len(cur) >= 25:
+                parts.append(cur)
+                cur = ""
+        if cur:
+            parts.append(cur)
         self.state = "speaking"
-        for i in range(0, len(pcm), RATE * 2):            # 1 s pieces
-            self._send(b"A", pcm[i:i + RATE * 2])
-        dur = len(pcm) / (RATE * 2)
-        self.speaking_until = time.time() + dur + 0.35
+        began, end, first = time.time(), time.time(), None
+        for part in parts:
+            if self.state != "speaking":
+                break                                     # the call ended while she was talking
+            try:
+                pcm = to_48k_pcm(self.synth(part))
+            except Exception as exc:                      # noqa: BLE001
+                self.log(f"phoneline: voice failed: {exc}")
+                continue
+            for i in range(0, len(pcm), RATE * 2):        # 1 s pieces
+                self._send(b"A", pcm[i:i + RATE * 2])
+            if first is None:
+                first = time.time() - began
+            end = max(end, time.time()) + len(pcm) / (RATE * 2)
+            self.speaking_until = end + 0.35
+        self.last_voice_s = first or 0.0
         while time.time() < self.speaking_until and self.state == "speaking":
             time.sleep(0.05)
         if self.state == "speaking":
@@ -180,7 +258,9 @@ class PhoneLine:
             return
         try:
             self.state = "thinking"
-            heard = ((self.transcribe(to_wav(pcm)) or {}).get("text") or "").strip()
+            t0 = time.time()
+            heard = ((self.transcribe(to_wav(pcm, self.det.rate)) or {}).get("text") or "").strip()
+            t_stt = time.time() - t0
             if not heard or len(re.sub(r"\W", "", heard)) < 2:
                 self.state = "listening"
                 return
@@ -189,14 +269,18 @@ class PhoneLine:
                 self.say("Goodbye, Sir.")
                 self.hangup()
                 return
+            t1 = time.time()
             out = self.ask("[Live phone call: answer in one to three short spoken sentences, no lists, "
                            "no markdown, no links.] " + heard) or {}
+            t_ask = time.time() - t1
             reply = (out.get("text") or "").strip() if not out.get("error") else "Sorry, Sir, something went wrong on my end."
             reply = re.sub(r"::(CAD|MODEL|HOLO|BUILD)\b[\s\S]*?(::END|$)", "", reply).strip() or "Done, Sir."
             if self.on_turn:
                 self.on_turn(heard, reply)
             if self.state != "idle":
                 self.say(reply)
+                self.log(f"phoneline: turn timing: pause {self.det_pause:.2f}s + hearing {t_stt:.1f}s + thinking "
+                         f"{t_ask:.1f}s + voice {self.last_voice_s:.1f}s")
         finally:
             self.turn_busy.release()
 
