@@ -53,7 +53,7 @@
     --mono:    "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
 
     --accent: #c08cff;
-    transition: --accent .7s ease;
+    transition: --accent .35s ease-in-out;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -1001,10 +1001,12 @@
     // One colour for the whole room: the pill, the command bar's glow and the
     // light behind the glass all follow what she is doing, and glide there.
     document.body.dataset.mode = mode;
-    const tint = (typeof STATES !== "undefined") && STATES[mode] ? STATES[mode].accent : "#c08cff";
-    document.documentElement.style.setProperty("--accent", tint);
     const known = (typeof STATES !== "undefined") && STATES[mode];
-    els.chipText.textContent = label || (known ? known.label : mode);
+    const fl = (typeof lookNow === "function") ? lookNow() : null;
+    const tint = fl ? fl.accent : (known ? known.accent : "#c08cff");
+    document.documentElement.style.setProperty("--accent", tint);
+    const flLabel = fl && fl.flavour && mode !== "speaking" ? FLAVOURS[fl.flavour].label : "";
+    els.chipText.textContent = flLabel || label || (known ? known.label : mode);
     els.chip.classList.toggle("pulse", mode !== "idle");
   }
 
@@ -1080,6 +1082,75 @@
   };
 
   function styleFor(m) { return STATES[m] || STATES.idle; }
+
+  /* Flavour, the same table as the corner orb (nova_orb.py FLAVOURS), named by
+     the bridge (nova_mood.py): the tool she is holding while she works, or the
+     tone of the sentence she is saying. Each has its own colour AND motion. */
+  const FLAVOURS = {
+    searching: { accent: "#4dd8ff", spin: 1.5, bloom: 1.0,  pulse: "",        move: "sweep", label: "Searching"   },
+    music:     { accent: "#3df5a0", spin: 1.0, bloom: 1.1,  pulse: "beat",    move: "",      label: "On it"       },
+    hands:     { accent: "#5b8cff", spin: 1.2, bloom: 1.0,  pulse: "tick",    move: "",      label: "Working"     },
+    memory:    { accent: "#a67bff", spin: 0.7, bloom: 1.15, pulse: "breathe", move: "",      label: "Remembering" },
+    looking:   { accent: "#d8f0ff", spin: 0.8, bloom: 1.0,  pulse: "",        move: "iris",  label: "Looking"     },
+    talking:   { accent: "#ffa86b", spin: 1.1, bloom: 1.0,  pulse: "",        move: "orbit", label: "Messaging"   },
+    fault:     { accent: "#ff5a5a", spin: 0.9, bloom: 0.9,  pulse: "",        move: "shake", label: "Hmm"         },
+    playful:   { accent: "#ff6ec7", spin: 1.5, bloom: 1.05, pulse: "",        move: "bob"   },
+    warm:      { accent: "#ffb08a", spin: 0.7, bloom: 1.25, pulse: "breathe", move: ""      },
+    sorry:     { accent: "#7aa6ff", spin: 0.55, bloom: 0.8, pulse: "",        move: "droop" },
+    alert:     { accent: "#ff8a2e", spin: 1.6, bloom: 1.05, pulse: "double",  move: ""      },
+    done:      { accent: "#ffe06b", spin: 1.2, bloom: 1.15, pulse: "",        move: ""      }
+  };
+  const FADE_MS = 320;            // colour crossfade: smooth, but over in a third of a second
+  const FLAVOURED = { thinking: 1, tool: 1, speaking: 1 };
+
+  function flavourNow() {
+    const f = state.flavour;
+    return f && FLAVOURS[f] && FLAVOURED[state.mode] ? f : "";
+  }
+  // The mode's look with the flavour laid over it (a flavour replaces the prism).
+  function lookNow() {
+    const base = styleFor(state.mode), f = flavourNow();
+    if (!f) return Object.assign({ bloom: 1, pulse: "", move: "", flavour: "" }, base);
+    const fl = FLAVOURS[f];
+    return Object.assign({}, base, { accent: fl.accent, spin: (base.spin || 1) * fl.spin, prism: 0,
+                                     bloom: fl.bloom, pulse: fl.pulse, move: fl.move, flavour: f });
+  }
+
+  // OKLab, so violet -> cyan glides through blue and never through grey.
+  function toOklab(c) {
+    const lin = c.map(v => { v /= 255; return v > 0.04045 ? Math.pow((v + 0.055) / 1.055, 2.4) : v / 12.92; });
+    const l = Math.cbrt(0.4122214708 * lin[0] + 0.5363325363 * lin[1] + 0.0514459929 * lin[2]);
+    const m = Math.cbrt(0.2119034982 * lin[0] + 0.6806995451 * lin[1] + 0.1073969566 * lin[2]);
+    const s = Math.cbrt(0.0883024619 * lin[0] + 0.2817188376 * lin[1] + 0.6299787005 * lin[2]);
+    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+  }
+  function fromOklab(o) {
+    const l = Math.pow(o[0] + 0.3963377774 * o[1] + 0.2158037573 * o[2], 3);
+    const m = Math.pow(o[0] - 0.1055613458 * o[1] - 0.0638541728 * o[2], 3);
+    const s = Math.pow(o[0] - 0.0894841775 * o[1] - 1.2914855480 * o[2], 3);
+    return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s]
+      .map(v => { v = Math.max(0, Math.min(1, v)); return 255 * (v > 0.0031308 ? 1.055 * Math.pow(v, 1 / 2.4) - 0.055 : 12.92 * v); });
+  }
+
+  // The flavour rides on top of whatever mode the panel is in. Changing it
+  // re-tints the room and the pill too, and kicks the same surge + ripple.
+  function setFlavour(f) {
+    f = f && FLAVOURS[f] ? f : "";
+    if (f === state.flavour) return;
+    state.flavour = f;
+    if (FLAVOURED[state.mode]) {
+      const look = lookNow();
+      document.documentElement.style.setProperty("--accent", look.accent);
+      const fl = FLAVOURS[f];
+      if (fl && fl.label && state.mode !== "speaking") els.chipText.textContent = fl.label;
+      else if (!f) els.chipText.textContent = styleFor(state.mode).label;
+      core.surge = Math.max(core.surge, 0.7);
+    }
+  }
 
   /* When she is genuinely working the core stops being one colour and runs a
      spectrum -- and the longer the work goes on, the deeper the saturation.
@@ -1197,8 +1268,26 @@
     angle: RINGS.map(() => 0),      // accumulated rotation
     surge: 0,                       // spikes on a state change, then decays
     burst: 0,                       // the star's own counter-rotation
-    last:  0
+    last:  0,
+    // flavour layer
+    target: "#c08cff", fadeFrom: null, fadeTo: null, fadeT: 1,
+    look: "",                       // mode|flavour last frame, to spot a change
+    ripple: 1, rippleHex: "#c08cff",
+    bloom: 1, sweep: 0,
+    fx:    { sweep: 0, bob: 0, shake: 0, droop: 0, iris: 0, orbit: 0 },
+    pulse: { beat: 0, double: 0, breathe: 0, tick: 0 }
   };
+
+  function flavourPulse(t) {
+    const w = core.pulse;
+    let out = 0;
+    if (w.beat > 0.01)    out += w.beat * 0.30 * Math.pow(Math.max(0, Math.sin(t * 0.01257)), 6);
+    if (w.double > 0.01) { const ph = (t % 1100) / 1100;
+                           out += w.double * 0.32 * (Math.exp(-(((ph - 0.05) / 0.04) ** 2)) + Math.exp(-(((ph - 0.22) / 0.04) ** 2))); }
+    if (w.breathe > 0.01) out += w.breathe * 0.14 * (0.5 + 0.5 * Math.sin(t * 0.0021));
+    if (w.tick > 0.01)    out += w.tick * 0.12 * Math.exp(-((t % 250) / 40));
+    return out;
+  }
 
   const MOTES = Array.from({ length: 30 }, () => ({
     a: Math.random() * Math.PI * 2, life: Math.random(),
@@ -1225,12 +1314,31 @@
     const S = side, c = S / 2, R = (S / 2) * 0.84;
     ctx2d.clearRect(0, 0, S, S);
     ctx2d.lineCap = "round";
-    const look = styleFor(state.mode);
+    const look = lookNow();
 
     // Frame-rate independent easing: the same visual speed at 30fps or 144.
     const dt = Math.max(1, Math.min(80, t - (core.last || t)));
     core.last = t;
     const ease = reduceMotion ? 1 : 1 - Math.exp(-dt / 190);
+    const quick = reduceMotion ? 1 : 1 - Math.exp(-dt / 140);
+
+    // A new mode or flavour: the ripple runs out in the new colour.
+    const lookKey = state.mode + "|" + look.flavour;
+    if (lookKey !== core.look) {
+      if (core.look && !reduceMotion) { core.ripple = 0; core.rippleHex = look.accent; }
+      if (look.flavour === "done") core.surge = Math.max(core.surge, 1.2);
+      core.look = lookKey;
+    }
+    core.bloom += ((look.bloom || 1) - core.bloom) * quick;
+    for (const k in core.fx) core.fx[k] += ((look.move === k ? 1 : 0) - core.fx[k]) * quick;
+    for (const k in core.pulse) core.pulse[k] += ((look.pulse === k ? 1 : 0) - core.pulse[k]) * quick;
+    core.ripple = Math.min(1, core.ripple + dt / 520);
+    const fx = core.fx;
+    const ox = reduceMotion ? 0 : fx.shake * 2.6 * Math.sin(t * 0.09) * (0.6 + 0.4 * Math.sin(t * 0.013));
+    const oy = reduceMotion ? 0 : -fx.bob * 3.2 * Math.abs(Math.sin(t * 0.0105)) + fx.droop * 3.0
+                                  + fx.shake * 1.2 * Math.sin(t * 0.071);
+    const cx = c + ox * (S / 200), cy = c + oy * (S / 200);    // the orb's pixel offsets, scaled to this canvas
+    const iris = reduceMotion ? 1 : 1 + fx.iris * 0.08 * Math.sin(t * 0.0035);
 
     let drive;
     if (state.mode === "listening") {
@@ -1243,10 +1351,30 @@
     else if (state.mode === "remember")     drive = 0.30 + 0.18 * Math.sin(t * 0.007);
     else                                    drive = 0.10 + 0.045 * Math.sin(t * 0.0013);
 
+    drive = Math.min(1.2, drive + (reduceMotion ? 0 : flavourPulse(t)));
+
     // ---- ease everything toward the state it is heading for ----
-    const want = hexRgb(reduceMotion ? look.accent
-                        : prismAt(look.accent, look.prism || 0, t, modeAge()));
-    for (let i = 0; i < 3; i++) core.rgb[i] += (want[i] - core.rgb[i]) * ease;
+    if (look.prism && !reduceMotion) {
+      // The working prism moves every frame: follow it with the old easing.
+      const want = hexRgb(prismAt(look.accent, look.prism, t, modeAge()));
+      for (let i = 0; i < 3; i++) core.rgb[i] += (want[i] - core.rgb[i]) * ease;
+      core.target = ""; core.fadeT = 1;
+    } else {
+      // A fixed colour: a timed OKLab crossfade, always over in FADE_MS.
+      if (look.accent !== core.target) {
+        core.target = look.accent;
+        core.fadeFrom = toOklab(core.rgb);
+        core.fadeTo = toOklab(hexRgb(look.accent));
+        core.fadeT = reduceMotion ? 1 : 0;
+      }
+      if (core.fadeT < 1) {
+        core.fadeT = Math.min(1, core.fadeT + dt / FADE_MS);
+        const k = core.fadeT * core.fadeT * (3 - 2 * core.fadeT);
+        core.rgb = fromOklab(core.fadeFrom.map((a, i) => a + (core.fadeTo[i] - a) * k));
+      } else {
+        core.rgb = hexRgb(core.target);
+      }
+    }
     core.spin += ((look.spin || 1) - core.spin) * ease;
 
     const accent = rgbHex(core.rgb);
@@ -1263,7 +1391,7 @@
       const present = core.ring[i];
       if (present < 0.015) continue;
 
-      const rr = R * ring.r * (1 + drive * 0.030);
+      const rr = R * ring.r * (1 + drive * 0.030) * (i % 2 ? iris : 2 - iris);
 
       // The orbit. Each ring leans through its own slow ellipse on its own
       // phase, so they cross rather than sit concentric -- which is what reads
@@ -1274,7 +1402,7 @@
                    : 1 - ORBIT * (0.5 + 0.5 * Math.sin(t * 0.00026 + core.phase[i]));
 
       ctx2d.save();
-      ctx2d.translate(c, c);
+      ctx2d.translate(cx, cy);
       ctx2d.scale(1, squash);
       ctx2d.rotate(core.angle[i]);
 
@@ -1327,10 +1455,51 @@
       ctx2d.restore();
     }
 
+    // ---- flavour extras: one path each, no per-frame gradients ----
+    if (!reduceMotion && (fx.sweep > 0.02 || fx.orbit > 0.02 || core.ripple < 1)) {
+      ctx2d.save();
+      ctx2d.translate(cx, cy);
+      ctx2d.strokeStyle = accent;
+      ctx2d.fillStyle = accent;
+      if (fx.sweep > 0.02) {                       // searching: a radar sweep racing round
+        core.sweep += dt * 0.0062;
+        ctx2d.lineWidth = 1.4;
+        for (let j = 0; j < 18; j += 3) {          // six batches of three spokes, fading
+          ctx2d.globalAlpha = 0.55 * fx.sweep * (1 - j / 18);
+          ctx2d.beginPath();
+          for (let q = j; q < j + 3; q++) {
+            const th = core.sweep - q * 0.045;
+            ctx2d.moveTo(Math.cos(th) * R * 0.40, Math.sin(th) * R * 0.40);
+            ctx2d.lineTo(Math.cos(th) * R * 0.95, Math.sin(th) * R * 0.95);
+          }
+          ctx2d.stroke();
+        }
+      }
+      if (fx.orbit > 0.02) {                       // messaging: three sparks chasing round
+        for (let j = 0; j < 3; j++) {
+          const th = t * 0.0042 + j * 0.42;
+          ctx2d.globalAlpha = fx.orbit * (1 - j * 0.25);
+          ctx2d.beginPath();
+          ctx2d.arc(Math.cos(th) * R * 0.97, Math.sin(th) * R * 0.97 * 0.86, (3.2 - j * 0.7) * (S / 200), 0, Math.PI * 2);
+          ctx2d.fill();
+        }
+      }
+      if (core.ripple < 1) {                       // the change: a ring of the new colour running out
+        const p = core.ripple, pe = 1 - Math.pow(1 - p, 3);
+        ctx2d.strokeStyle = core.rippleHex;
+        ctx2d.lineWidth = (2 + 5 * p) * (S / 200);
+        ctx2d.globalAlpha = 0.9 * Math.pow(1 - p, 1.5);
+        ctx2d.beginPath();
+        ctx2d.arc(0, 0, R * (0.30 + 0.85 * pe), 0, Math.PI * 2);
+        ctx2d.stroke();
+      }
+      ctx2d.restore();
+    }
+
     // bloom + burst
-    const coreR = R * 0.34 * (1 + drive * 0.18);
+    const coreR = R * 0.34 * (1 + drive * 0.18) * core.bloom;
     ctx2d.save();
-    ctx2d.translate(c, c);
+    ctx2d.translate(cx, cy);
 
     // Light adds up here, as it would on glass.
     ctx2d.globalCompositeOperation = "lighter";
@@ -1376,8 +1545,9 @@
 
     // Hairline diffraction spikes behind the arms, the way a bright point
     // reads through a lens. They lengthen with her voice and with a surge.
+    const wobble = reduceMotion ? 0 : fx.bob * 0.25 * Math.sin(t * 0.0105);   // playful: the star waggles
     ctx2d.save();
-    ctx2d.rotate(core.burst);
+    ctx2d.rotate(core.burst + wobble);
     for (let i = 0; i < 4; i++) {
       const long = i % 2 === 0;
       const len = R * (long ? 0.98 : 0.6) * (0.72 + drive * 0.4 + core.surge * 0.2);
@@ -1394,7 +1564,7 @@
     ctx2d.restore();
 
     ctx2d.globalAlpha = 1;
-    drawBurst(accent, coreR * 1.5, drive, core.burst, 4);
+    drawBurst(accent, coreR * 1.5, drive, core.burst + wobble, 4);
 
     // white-hot centre
     const heart = ctx2d.createRadialGradient(0, 0, 0, 0, 0, coreR * 0.42);
@@ -1410,7 +1580,7 @@
     // browser microphone to read while she talks: draw it from her level.
     if (state.mode === "speaking" && !freqData) {
       ctx2d.save();
-      ctx2d.translate(c, c);
+      ctx2d.translate(cx, cy);
       ctx2d.strokeStyle = accent;
       ctx2d.lineWidth = 2;
       const bars = 72;
@@ -1430,7 +1600,7 @@
 
     if (freqData && (state.mode === "listening" || state.mode === "speaking")) {
       ctx2d.save();
-      ctx2d.translate(c, c);
+      ctx2d.translate(cx, cy);
       ctx2d.strokeStyle = accent;
       ctx2d.lineWidth = 2;
       const bars = 64, step = Math.floor(freqData.length / bars) || 1;
@@ -5564,9 +5734,22 @@
   // a request of its own it already knows better than a poll, so it leads.
   const ORB_MODE = { listening: "listening", thinking: "thinking", speaking: "speaking", approval: "tool", offline: "offline" };
   const ORB_LABEL = { approval: "Your call" };
+  // ?demo=thinking:searching pins a look for checking the design; with it the
+  // bridge does not steer the core. ?demo=cycle walks every flavour.
+  const DEMO = new URLSearchParams(location.search).get("demo");
+  if (DEMO) {
+    const pin = (spec) => { const [m, f] = spec.split(":"); setMode(m || "idle"); setFlavour(f || ""); };
+    if (DEMO === "cycle") {
+      const seq = Object.keys(FLAVOURS).map(f => (["playful", "warm", "sorry", "alert", "done"].includes(f) ? "speaking:" : "thinking:") + f);
+      let i = 0; pin(seq[0]);
+      setInterval(() => { i = (i + 1) % seq.length; state.speakEnv = 0.5; pin(seq[i]); }, 1500);
+    } else setInterval(() => pin(DEMO), 500);       // re-pinned, so boot's own "Ready" cannot undo it
+  }
   async function syncOrb(quiet) {
+    if (DEMO) return;
     let o;
     try { o = await api("/api/orb?panel=1"); } catch (e) { return; }
+    setFlavour(o.flavour || "");             // the tone/tool layer follows the bridge even mid-request
     if (typeof o.turn === "number") {
       if (state.orbTurn != null && o.turn !== state.orbTurn && !quiet && o.last) {
         // An exchange this panel did not carry: show it as if it had.
@@ -5594,7 +5777,14 @@
       if (["listening", "thinking", "speaking", "tool", "offline"].includes(state.mode)) setMode("idle");
     }
   }
-  setInterval(() => { if (!document.hidden) syncOrb(false); }, 450);
+  // 200 ms so a change of tool or tone lands on the core at once; one tiny
+  // local request, skipped while a previous one is still out.
+  let orbPolling = false;
+  setInterval(() => {
+    if (document.hidden || orbPolling) return;
+    orbPolling = true;
+    syncOrb(false).finally(() => { orbPolling = false; });
+  }, 200);
 
   // ------------------------------------------------------------- boot
   (async function boot() {

@@ -164,6 +164,14 @@ _yy, _xx = np.mgrid[0:H, 0:W].astype(np.float32)
 DX, DY = _xx - CX, _yy - CY
 DIST = np.sqrt(DX * DX + DY * DY)
 
+# Layers that never change between frames, computed once.
+_g = np.clip((R * 1.16 - DIST) / (R * 0.20), 0, 1)
+GLASS = (_g * _g * (3 - 2 * _g)).astype(np.float32)
+GLASS_RGB = np.array([0.035, 0.015, 0.075], dtype=np.float32)
+PLATE = np.exp(-(((_xx - W / 2) / 48.0) ** 4 + ((_yy - (H - 15)) / 9.5) ** 4)).astype(np.float32)
+PLATE_RGB = np.array([0.04, 0.02, 0.09], dtype=np.float32)
+MID_F = np.array(MID, dtype=np.float32) / 255.0
+
 _font_cache: dict = {}
 _caption_cache: dict = {}
 
@@ -378,79 +386,86 @@ class Core:
         line_i = np.asarray(lines.resize((W, H), Image.LANCZOS), dtype=np.float32) / 255.0
 
         # ---- compose
+        # Every layer is blended in place, and only inside the box it can
+        # actually cover: the star's arms and the heart are a fraction of the
+        # window, so painting them across all of it was most of the frame time.
         rgb = np.zeros((H, W, 3), dtype=np.float32)        # premultiplied
         alpha = np.zeros((H, W), dtype=np.float32)
 
-        def add(mask, colour):
-            nonlocal alpha
-            m = np.clip(mask, 0.0, 1.0)
-            rgb[:] = rgb * (1 - m[..., None]) + colour * m[..., None]
-            alpha = alpha + m * (1 - alpha)
+        def box(radius):
+            y0, y1 = max(0, int(ccy - radius - 2)), min(H, int(ccy + radius + 3))
+            x0, x1 = max(0, int(ccx - radius - 2)), min(W, int(ccx + radius + 3))
+            return (slice(y0, y1), slice(x0, x1))
+
+        def blend(sl, m, colour):
+            r, a = rgb[sl], alpha[sl]
+            r += (colour - r) * m[..., None]
+            a += m * (1 - a)
+
+        full = (slice(0, H), slice(0, W))
 
         # The panel draws this on near-black. On the desktop there is no such
         # guarantee, so it carries its own dark glass behind it, fading out
         # softly at the rim; without it the thin lines vanish on a light wallpaper.
         if backing > 0:
-            glass = np.clip((R * 1.16 - DIST) / (R * 0.20), 0, 1)
-            add(glass * glass * (3 - 2 * glass) * backing, np.array([0.035, 0.015, 0.075], dtype=np.float32))
+            blend(full, GLASS * backing, GLASS_RGB)
 
         # the change ripple: a ring of the NEW colour that runs out from the core
         if self.ripple < 1.0:
             p = self.ripple
             p_e = 1 - (1 - p) ** 3
             rad = R * (0.30 + 0.85 * p_e)
-            band = np.clip(1 - np.abs(dist - rad) / (2.0 + 5.0 * p), 0, 1)
-            add(band * (1 - p) ** 1.5 * 0.9, self.ripple_rgb)
+            sl = box(rad + 8)
+            band = np.clip(1 - np.abs(dist[sl] - rad) / (2.0 + 5.0 * p), 0, 1)
+            blend(sl, band * ((1 - p) ** 1.5 * 0.9), self.ripple_rgb)
 
         # bloom
         core_r = R * 0.34 * (1 + drive * 0.18) * self.bloom
-        x = np.clip(dist / (core_r * 2.4), 0, 1)
+        sl = box(core_r * 2.4)
+        x = np.clip(dist[sl] / (core_r * 2.4), 0, 1)
         bloom_a = np.interp(x, [0, 0.20, 0.55, 1.0], [1.0, 0.80, 0.25, 0.0]).astype(np.float32)
         mix = np.clip((x - 0.20) / 0.35, 0, 1)[..., None]
-        bloom_c = accent[None, None, :] * (1 - mix) + (np.array(MID, dtype=np.float32) / 255.0)[None, None, :] * mix
-        m = (bloom_a * (0.5 + drive * 0.5))[..., None]
-        rgb[:] = rgb * (1 - m) + bloom_c * m
-        alpha = alpha + m[..., 0] * (1 - alpha)
+        bloom_c = accent + (MID_F - accent) * mix
+        blend(sl, bloom_a * (0.5 + drive * 0.5), bloom_c)
 
         # the rings sit over the bloom
-        add(line_i, accent)
+        blend(full, line_i, accent)
 
         # the burst: four arms, long and short alternating, turning against the rings
         self.burst -= self.spin * rush * dt * 0.00028
         wobble = fx["bob"] * 0.25 * math.sin(t * 0.0105)       # playful: the star waggles
         radius = core_r * 1.5
         white = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        sl = box(radius * (1 + drive * 0.55))
+        bdx, bdy = dx[sl], dy[sl]
         for k in range(4):
             th = self.burst + wobble + (k / 4) * math.tau
             long = k % 2 == 0
             length = radius * (1.0 if long else 0.52) * (1 + drive * 0.55)
             half = radius * (0.13 if long else 0.085)
             c, s = math.cos(th), math.sin(th)
-            u = dx * c + dy * s                               # along the arm
-            v = -dx * s + dy * c                              # across it
+            u = bdx * c + bdy * s                             # along the arm
+            v = -bdx * s + bdy * c                            # across it
             f = u / length
             cover = np.clip(half * (1 - f) - np.abs(v) + 0.6, 0, 1) * (u >= -0.5) * (f <= 1)
             fade = np.clip(1 - (f - 0.25) / 0.75, 0, 1)       # accent -> transparent past a quarter
             whiten = np.clip(1 - f / 0.25, 0, 1)[..., None]   # white -> accent in the first quarter
-            colour = white[None, None, :] * whiten + accent[None, None, :] * (1 - whiten)
-            m = (cover * fade * (0.95 if long else 0.6))[..., None]
-            rgb[:] = rgb * (1 - m) + colour * m
-            alpha = alpha + m[..., 0] * (1 - alpha)
+            colour = accent + (white - accent) * whiten
+            blend(sl, cover * fade * (0.95 if long else 0.6), colour)
 
         # white-hot centre
-        hx = np.clip(dist / (core_r * 0.42), 0, 1)
+        sl = box(core_r * 0.42)
+        hx = np.clip(dist[sl] / (core_r * 0.42), 0, 1)
         heart_a = np.interp(hx, [0, 0.6, 1.0], [1.0, 1.0, 0.0]).astype(np.float32) * (0.85 + drive * 0.15)
         hmix = np.clip(hx / 0.6, 0, 1)[..., None]
-        m = heart_a[..., None]
-        rgb[:] = rgb * (1 - m) + (white[None, None, :] * (1 - hmix) + accent[None, None, :] * hmix) * m
-        alpha = alpha + heart_a * (1 - alpha)
+        blend(sl, heart_a, white + (accent - white) * hmix)
 
         # caption, on its own small dark plate
         cap = caption_mask(caption)
         if cap is not None and caption_alpha > 0.02:
-            plate = np.exp(-(((_xx - W / 2) / 48.0) ** 4 + ((_yy - (H - 15)) / 9.5) ** 4))
-            add(plate * 0.72 * caption_alpha, np.array([0.04, 0.02, 0.09], dtype=np.float32))
-            add(cap * caption_alpha, np.clip(accent * 1.1, 0, 1))
+            sl = (slice(H - 32, H), slice(0, W))
+            blend(sl, PLATE[sl] * (0.72 * caption_alpha), PLATE_RGB)
+            blend(sl, cap[sl] * caption_alpha, np.clip(accent * 1.1, 0, 1))
 
         out = np.empty((H, W, 4), dtype=np.uint8)
         pm = np.clip(rgb, 0, 1) * 255.0
@@ -748,7 +763,10 @@ class Orb:
                 self.blank = self.vis <= 0.0
             except Exception:                         # noqa: BLE001 -- never let a bad frame kill the orb
                 pass
-        self.root.after(33 if self.vis > 0.0 else 120, self.tick)
+        # A steady 30 fps: wait out only what is left of the 33 ms slot, not a
+        # whole 33 ms on top of the time the frame took to draw.
+        spent = (time.time() - now) * 1000.0
+        self.root.after(max(1, int(33 - spent)) if self.vis > 0.0 else 120, self.tick)
 
     def raise_top(self) -> None:
         """Back to the top of the always-on-top band, without taking focus."""
