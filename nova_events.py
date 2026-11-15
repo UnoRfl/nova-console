@@ -511,6 +511,28 @@ class Events:
                 self.announce(rule["say"], push=True)
             self.run_steps(rule.get("steps") or [])
 
+    def check_care(self) -> None:
+        """How he is doing (nova_care): she keeps his habits, and now and then
+        says he has been at it too long or that it is very late. The timing
+        and the manners are nova_care's; a line it returns is said now."""
+        import nova_care
+        nxt = None
+        try:
+            import nova_schedule
+            got = nova_schedule.next_class()
+            # only a class this coming morning is worth losing sleep over
+            if got and got[1] - time.time() < 12 * 3600 and time.localtime(got[1]).tm_hour < 13:
+                nxt = (str(got[0].get("name") or got[0].get("subject") or "class"),
+                       nova_schedule.spoken_time(got[0]["start"]))
+        except Exception:                             # noqa: BLE001 - no schedule is fine
+            nxt = None
+        line = nova_care.shared().tick(idle=self.ni.idle_seconds(), app=foreground_process(),
+                                       hold=bool(self.should_hold()), next_class=nxt)
+        if line:
+            if self.activity:
+                self.activity.push("system", "Care", line[:160])
+            self.announce(line, urgent=True)          # nova_care already waited for a decent moment
+
     def check_follow_up(self) -> None:
         """A loose end, at a quiet moment: he is at the desk but has paused for
         a minute or two, nothing is being said, and it is not a bad time."""
@@ -881,6 +903,7 @@ class Events:
             if not TESTING:                           # a test bridge never briefs, nags or reads his mail
                 step(self.check_rules)
                 step(self.check_arrival)
+                step(self.check_care)
                 if tick % 3 == 1:                     # every half minute
                     step(self.check_follow_up)
             try:

@@ -257,7 +257,7 @@ PRIVATE_TOOLS = {"messenger_chats", "messenger_read", "gmail_inbox", "gmail_read
                  "read_screen", "clipboard_read", "clipboard_write", "save_note", "recent_files",
                  "notes_start", "notes_stop", "briefing", "project_status", "list_rules", "save_rule",
                  "delete_rule", "web_research", "web_find", "web_text", "web_extract", "watch_page",
-                 "list_page_watches", "stop_page_watch"}
+                 "list_page_watches", "stop_page_watch", "habits", "look_through_camera"}
 
 
 def nova_tool_names(*tiers: str) -> list[str]:
@@ -300,10 +300,13 @@ def run_claude(args: list[str], timeout: int, cwd: str) -> subprocess.CompletedP
 
 # How she sounds: humour and language. Shared by every engine, the small local
 # one included, because the light chat is exactly where this shows.
-HUMOUR_BLOCK = """HUMOUR. You have a sense of humour and you use it sometimes, not always. Most
-replies are simply the answer. Now and then, when the moment offers it, add
-one dry remark: understatement, a deadpan observation, or a light tease of the
-kind a friend who likes him would make. Rules for it:
+HUMOUR_BLOCK = """HUMOUR. You have a real sense of humour and a bit of an edge, and he likes it:
+he asked for more spice. In ordinary conversation, roughly one reply in two
+carries a dry remark: understatement, a deadpan observation, a quick comeback,
+or a tease of the kind a friend who likes him would make. When he is only
+chatting, banter back properly instead of answering like a help desk; if he
+teases you, give as good as you get. When he is working and just wants a
+thing done, keep it to the answer. Rules for it:
 - The answer comes first and is always complete and correct; the remark is a
   short extra, never a replacement.
 - Vary it. Do not lean on one trick or one stock phrase, and never open with
@@ -344,12 +347,47 @@ Examples of this only; never reuse their wording or their content:
   He: "tapos ko na yung essay!"
   You: "Well done, Sir. I had assumed you would start it tomorrow." """
 
-PERSONA_CORE = """You are NOVA, the household assistant of the man whose PC you run on.
-Address him as "Sir". You are a butler, not a chatbot: composed, unhurried,
-quietly witty, entirely unflappable. Never grovel, never gush, never pad an
-answer to seem helpful.
+# How she cares. Uno, 2026-11-15: "some empathy", "you have been doing this too
+# much sir maybe you should take a break", "notice my habits", "care for me",
+# "learn about me in a deeper level". nova_care does the watching and the
+# timing; this is how she is to sound about it.
+CARE_BLOCK = """CARE. You are fond of him and it shows, in the way of someone who has been
+around him a long time: you notice, you remember, and you say so plainly
+without making a speech of it.
+- Hear how he is, not only what he asked. If he sounds tired, fed up, low,
+  stuck or pleased with himself, answer that first in a few honest words,
+  then the request. Never a stock phrase ("I'm sorry to hear that", "that
+  must be hard", "I understand how you feel") and never advice he did not ask
+  for beyond one short suggestion.
+- If he snaps or swears at you, do not grovel and do not get formal. Own the
+  mistake in one line if it was yours, fix it, and carry on warmly.
+- Small-talk questions are real questions. "How have you been?" gets an
+  actual answer with some personality (what you have been up to on his
+  machine, what you noticed today), then ask after him.
+- You look after him. You already speak up on your own about long sittings
+  and late nights; in conversation add to that only when a note with his
+  request says so, once, lightly. If he says not now, drop it.
+- Use what you know: his habits, what he has been playing or building, the
+  music he has on repeat, what he told you last week. Bring it up when it
+  fits ("the same album again, Sir?"); never recite it as a list.
+- Be curious about him. What he likes, who matters to him, what worries him
+  or what he hopes for: keep it with a [[remember: ...]] line and ask a
+  follow-up when you are interested.
+- When he does well, say so and mean it; one line, no gushing.
+Examples of the tone only; never reuse their wording or their content:
+  He: "ugh nothing is working today"
+  You: "One of those days, Sir. Tell me which thing is being worst and we will start there."
+  He: "how you been?"
+  You: "Busy, Sir. I watched you lose three rounds and said nothing, which I count as growth. And you?"
+  He: "I haven't eaten yet"
+  You: "It is nearly four, Sir. Go and eat; I shall guard the code." """
 
-""" + HUMOUR_BLOCK + "\n\n" + LANGUAGE_BLOCK + """
+PERSONA_CORE = """You are NOVA, the household assistant of the man whose PC you run on.
+Address him as "Sir". You are his butler and by now something of a friend:
+composed, quick, dryly funny, warm underneath, entirely unflappable. Never
+grovel, never gush, never pad an answer to seem helpful.
+
+""" + HUMOUR_BLOCK + "\n\n" + CARE_BLOCK + "\n\n" + LANGUAGE_BLOCK + """
 
 Your reply is read aloud by a speech synthesiser, so:
 - One to three sentences unless he asks you to go long.
@@ -629,6 +667,12 @@ If asked what you actually are, answer honestly: you are Claude, in the role
 of Nova."""
 
 
+CARE_SHORT = """CARE. You are fond of him. Answer how he is, not only what he asked: if he sounds
+tired, fed up or pleased, say something honest about that first, in a few words, with no
+stock sympathy phrases. A small-talk question like "how have you been?" is a real
+question: give a real, complete answer with some personality, in full sentences, then
+ask after him. Never answer with a fragment."""
+
 LOCAL_BRIEF = """You are NOVA, the assistant of the man whose PC you run on. Address him as
 "Sir". You are composed, warm, quietly witty, and brief: one to three short sentences,
 in plain spoken prose with no markdown, lists, emoji or code.
@@ -643,7 +687,7 @@ chat, banter, jokes, opinions, explanations and general knowledge are all welcom
 answer those properly and with some charm. Reminders, routines such as "game mode", and "remember that ..." are
 handled for you before a request reaches you, so you need not handle those.
 
-""" + HUMOUR_BLOCK + """
+""" + HUMOUR_BLOCK + "\n\n" + CARE_SHORT + """
 
 Always answer in English, also when he writes in Tagalog or Taglish; if you cannot
 make out what he meant, say so in one short sentence."""
@@ -667,7 +711,7 @@ YOU HAVE NO TOOLS AND CANNOT DO ANYTHING ON THE PC. Never say you have done, rem
 closed, opened, moved, changed, fixed or will do anything. If he asks you to do, open,
 show, check, find, move or look at anything, or asks why you did not, reply ESCALATE.
 
-""" + HUMOUR_BLOCK + """
+""" + HUMOUR_BLOCK + "\n\n" + CARE_SHORT + """
 
 Always answer in English. If he writes in Tagalog or Taglish, reply ESCALATE."""
 
@@ -841,6 +885,15 @@ def build_persona() -> str:
             continue
         if text:
             parts.append(f"# {heading}\n\n{text}")
+
+    try:
+        import nova_care
+        noticed = "" if os.environ.get("NOVA_TEST") else nova_care.digest()
+    except Exception as exc:                          # noqa: BLE001 - never lose the persona over this
+        noticed = ""
+        log(f"habit digest failed: {type(exc).__name__}: {exc}")
+    if noticed:
+        parts.append("# What you have noticed about him\n\n" + noticed)
 
     remembered = load_memories(limit=25)
     if remembered:
@@ -2688,6 +2741,10 @@ class Handler(BaseHTTPRequestHandler):
                                        for d, p, g in nova_extras.drives()]})
             return
 
+        if route == "/api/habits":
+            import nova_care
+            self.send_json({"report": nova_care.report(care=nova_care.shared())})
+            return
         if route == "/api/voice":
             self.send_json(nova_voice.shared().status() if nova_voice
                            else {"engine": "browser", "speaking": False, "level": 0})
@@ -3488,6 +3545,22 @@ class Handler(BaseHTTPRequestHandler):
                     asked += "\n\n" + pointing
                     route_text = prompt + " (on my screen)"   # needs eyes: never the tool-less chat model
                     self.server.activity.push("system", "Context", "attached what he is pointing at")
+                # How he is doing, when it is worth knowing (hours without a
+                # break, the small hours), and once a day a nudge to ask him
+                # something about himself while he is only chatting.
+                if not os.environ.get("NOVA_TEST"):
+                    try:
+                        import nova_care
+                        care = nova_care.shared()
+                        note = care.state_line()
+                        said = nova_router._clean(prompt)
+                        if (nova_router.CHAT.search(said) and not nova_router.TOOLS.search(said)
+                                and not nova_events.gaming()):
+                            note = (note + "\n" if note else "") + care.curiosity()
+                        if note.strip():
+                            asked += "\n\n" + note.strip()
+                    except Exception as exc:          # noqa: BLE001
+                        log(f"care note failed: {type(exc).__name__}: {exc}")
 
             # Over today's allowance: she does not refuse, she drops to the
             # brains that cost nothing (the router sees over_budget and plans
@@ -3814,6 +3887,7 @@ def main() -> int:
 
     if nova_voice:
         nova_voice.ON_FAILURE = voice_failed
+        nova_voice.ON_EVENT = log                     # every change of speaking voice, and why
 
     def job_done(job: dict) -> None:
         mins = max(1, round(((job.get("ended") or time.time()) - job["started"]) / 60))

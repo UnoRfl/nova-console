@@ -88,6 +88,58 @@ def language_for(model, audio, model_name: str = "") -> str:
     return best
 
 
+def languages_for(model, audio, model_name: str = "") -> list[str]:
+    """The language to write this clip in -- and a second one to try when the
+    guess is close. Taglish scores near the middle, and written in the wrong
+    language it is nonsense ("check my mind" for "i-check mo nga yung Gmail ko").
+    """
+    if str(model_name).endswith(".en"):
+        return ["en"]
+    langs = [x for x in (_cfg().get("stt_languages") or ["en", "tl"]) if isinstance(x, str) and x]
+    if len(langs) < 2:
+        return [(langs or ["en"])[0]]
+    try:
+        if audio is None or len(audio) < 4800:
+            return [langs[0]]
+        _lang, _p, probs = model.detect_language(audio)
+        probs = dict(probs)
+    except Exception:                                 # noqa: BLE001
+        return [langs[0]]
+    ours = {x: probs.get(x, 0.0) for x in langs}
+    total = sum(ours.values()) or 1.0
+    share = {x: v / total for x, v in ours.items()}   # between OUR languages only
+    first = max(langs, key=lambda x: share[x])
+    if first != langs[0] and ours[first] < 0.5:
+        first = langs[0]
+    second = [x for x in langs if x != first and share[x] >= 0.12 and ours[x] >= 0.03]
+    return [first] + second[:1]
+
+
+def hotwords() -> str:
+    """His names, given to Whisper as hotwords as well as in the prompt."""
+    return " ".join(vocabulary())
+
+
+def is_echo(text: str) -> bool:
+    """Whisper reciting its own prompt back, which it does on noise:
+    "Nova, what time is it? Nova, what time is it? Nova, what time is it?" """
+    t = " ".join(re.sub(r"[^a-z ]", "", str(text).lower()).split())
+    if not t:
+        return False
+    for line in (BASE_PROMPT, TAGALOG_PROMPT):
+        for sent in re.split(r"(?<=[.?!])\s+", line):
+            k = " ".join(re.sub(r"[^a-z ]", "", sent.lower()).split())
+            if len(k) > 12 and t.count(k) >= 2:
+                return True
+    words = t.split()
+    if len(words) >= 9:
+        for n in (3, 4, 5):
+            grams = [" ".join(words[i:i + n]) for i in range(len(words) - n + 1)]
+            if grams and max(grams.count(g) for g in set(grams)) >= 3:
+                return True
+    return False
+
+
 def prompt_for(lang: str) -> str:
     return prompt() if lang == "en" else prompt(TAGALOG_PROMPT)
 

@@ -50,6 +50,9 @@ import numpy as np
 ROOT = Path.home() / ".nova"
 MODELS = ROOT / "models"
 VOICEPRINT = ROOT / "voiceprint.npy"
+LIVEPRINT = ROOT / "voiceprint_live.npy"
+HEARD = ROOT / "heard"
+USE_HOTWORDS = True                   # the bench switches this off to measure what it buys
 LOG_FILE = ROOT / "ears.log"
 CONFIG_FILE = ROOT / "config.json"
 PID_FILE = ROOT / "wake.pid"          # same name the old listener used, so
@@ -63,6 +66,12 @@ DEFAULTS = {
     "speaker_threshold": 0.45,        # cosine similarity needed to count as you
     "speaker_threshold_short": 0.38,  # for clips under 1.2 s, which score lower
     "speaker_threshold_window": 0.30, # while a window HE opened is live (after "Nova", follow-up)
+    "speaker_threshold_rescue": 0.35, # a near-miss is still taken IF the sentence starts with her name
+    "learn_voice": True,              # keep the voiceprint current from sentences that are surely his
+    "model": None,                    # ears-only Whisper model (else config "whisper_model")
+    "compute": None,                  # e.g. "int8_float16": the big model in half the graphics memory
+    "beam": 5,                        # 1 = fastest; 5 = fewer wrong words for ~0.1 s
+    "keep_heard": 150,                # his last N requests kept in ~/.nova/heard for tuning (0 = none)
     "end_silence": 0.6,               # seconds of quiet that split speech into pieces
     "settle_seconds": 0.3,            # extra quiet before a finished-sounding request is sent
     "unfinished_seconds": 1.3,        # extra quiet allowed when it sounds cut off ("open the...")
@@ -221,8 +230,9 @@ def add_cuda_dll_dirs() -> None:
 
 
 class Whisper:
-    def __init__(self, name: str, device: str) -> None:
+    def __init__(self, name: str, device: str, compute_type: str | None = None, beam: int = 1) -> None:
         add_cuda_dll_dirs()
+        self.beam = max(1, int(beam))
         from faster_whisper import WhisperModel
 
         self.device = "cpu"
@@ -231,7 +241,7 @@ class Whisper:
         order = (["cuda", "cpu"] if device == "auto" else [device])
         for dev in order:
             try:
-                ctype = "float16" if dev == "cuda" else "int8"
+                ctype = (compute_type or "float16") if dev == "cuda" else "int8"
                 model = WhisperModel(name, device=dev, compute_type=ctype,
                                      cpu_threads=max(4, (os.cpu_count() or 8) // 2))
                 # Loading succeeds even when a CUDA library is missing; only
@@ -252,22 +262,38 @@ class Whisper:
         began = time.time()
         # English, or Tagalog when that is plainly what he spoke (multilingual
         # model only; an ".en" model always answers "en").
-        lang = nova_words.language_for(self.model, samples, self.name)
+        # Taglish ("i-check mo nga yung Gmail ko") sits between the two and the
+        # language guess is a coin toss, so when it is close the clip is written
+        # both ways and the reading Whisper itself is surer of is kept.
+        best, best_lp = "", -9.0
+        for lang in nova_words.languages_for(self.model, samples, self.name):
+            text, lp = self._decode(samples, lang)
+            if text and lp > best_lp:
+                best, best_lp = text, lp
+        self.last_logprob = best_lp
+        return best, time.time() - began
+
+    def _decode(self, samples: np.ndarray, lang: str) -> tuple[str, float]:
         segs, _ = self.model.transcribe(
-            samples, language=lang, beam_size=1,
+            samples, language=lang, beam_size=self.beam,
             condition_on_previous_text=False,
             # Bias the spelling of her name; without it "Nova" comes out as
             # "Noah" or "no va" often enough to matter. nova_words adds Sir's
             # own vocabulary (config "vocabulary"), so NVIDIA is not "Envije".
             initial_prompt=nova_words.prompt_for(lang),
+            hotwords=(nova_words.hotwords() or None) if USE_HOTWORDS else None,
             no_speech_threshold=0.6,
         )
-        parts = []
+        parts, lps = [], []
         for s in segs:
             if getattr(s, "no_speech_prob", 0.0) > 0.8:
                 continue
             parts.append(s.text.strip())
-        return clean(nova_words.fix(" ".join(parts))), time.time() - began
+            lps.append(float(getattr(s, "avg_logprob", -1.0)))
+        text = clean(nova_words.fix(" ".join(parts)))
+        if nova_words.is_echo(text):                  # it recited its own prompt: nothing was heard
+            return "", -9.0
+        return text, (sum(lps) / len(lps) if lps else -9.0)
 
 
 class Speaker:
@@ -285,6 +311,23 @@ class Speaker:
                 self.print = np.load(VOICEPRINT).astype(np.float32)
             except (OSError, ValueError):
                 self.print = None
+        # The enrolled print is a few sentences from one evening. His voice
+        # through the same mic drifts (a cold, a different distance, late at
+        # night): on 2026-11-15 his own requests had slid from a median 0.56 to
+        # 0.47 and a quarter of everything rejected sat just under the bar. The
+        # live print follows him, learning only from sentences the ENROLLED
+        # print already accepts and that begin with her name.
+        self.live: np.ndarray | None = None
+        self.last: np.ndarray | None = None           # embedding of the clip just scored
+        self.base = 0.0                               # its score against the enrolled print alone
+        self.learned = 0
+        if self.print is not None and LIVEPRINT.is_file():
+            try:
+                live = np.load(LIVEPRINT).astype(np.float32)
+                if live.shape == self.print.shape and float(np.dot(live, self.print)) >= 0.6:
+                    self.live = live
+            except (OSError, ValueError):
+                pass
 
     def embed(self, samples: np.ndarray) -> np.ndarray:
         st = self.ext.create_stream()
@@ -297,7 +340,35 @@ class Speaker:
     def score(self, samples: np.ndarray) -> float | None:
         if self.print is None:
             return None
-        return float(np.dot(self.embed(samples), self.print))
+        e = self.embed(samples)
+        self.last = e
+        self.base = float(np.dot(e, self.print))
+        if self.live is None:
+            return self.base
+        # The live print may lift a score by at most 0.12: it follows his
+        # voice, it must never become a different lock.
+        return max(self.base, min(float(np.dot(e, self.live)), self.base + 0.12))
+
+    def learn(self) -> bool:
+        """Fold the clip just scored into the live print. The caller has
+        already checked it is surely him."""
+        if self.print is None or self.last is None:
+            return False
+        new = (self.live if self.live is not None else self.print) * 0.93 + self.last * 0.07
+        n = float(np.linalg.norm(new))
+        if not n:
+            return False
+        new = (new / n).astype(np.float32)
+        if float(np.dot(new, self.print)) < 0.6:      # drifted too far from the enrolment: stop
+            return False
+        self.live = new
+        self.learned += 1
+        if self.learned % 5 == 1 and not os.environ.get("NOVA_TEST"):
+            try:
+                np.save(LIVEPRINT, new)
+            except OSError:
+                pass
+        return True
 
 
 def make_vad(cfg: dict):
@@ -371,7 +442,14 @@ class Ears:
         self.debug = debug
         self.bridge = Bridge(dry=dry)
         self.speaker = Speaker()
-        self.whisper = Whisper(cfg["whisper_model"], cfg["whisper_device"])
+        want = str(cfg.get("model") or cfg["whisper_model"])
+        try:
+            self.whisper = Whisper(want, cfg["whisper_device"], cfg.get("compute"), int(cfg.get("beam") or 1))
+            if self.whisper.device != "cuda" and want != cfg["whisper_model"]:
+                raise RuntimeError("the graphics card would not take it")   # the big model is too slow on the processor
+        except Exception as exc:                      # noqa: BLE001 - no memory left on the card, a bad name...
+            log(f"whisper {want} would not start ({str(exc)[:120]}); using {cfg['whisper_model']}")
+            self.whisper = Whisper(cfg["whisper_model"], cfg["whisper_device"], None, int(cfg.get("beam") or 1))
         self.armed_until = 0.0        # a bare "Nova" was heard; a request may follow
         self.followup_until = 0.0     # Nova just spoke; no wake word needed
         self.nova_speaking = False    # she is talking; your voice now means "stop"
@@ -401,6 +479,7 @@ class Ears:
             return out
 
         # 2. Is it you?
+        rescued = False
         score = self.speaker.score(samples)
         out["score"] = None if score is None else round(score, 3)
         if score is not None:
@@ -416,20 +495,30 @@ class Ears:
                     or self.held is not None):
                 need = min(need, self.cfg["speaker_threshold_window"])
             if score < need:
-                self.stats["not_you"] += 1
-                out["why"] = "not your voice"
-                return out
+                # A near-miss used to be thrown away unheard, and that was Sir
+                # being ignored about one time in four. Now it is transcribed,
+                # and kept only if it plainly starts with her name.
+                if score >= float(self.cfg["speaker_threshold_rescue"]) and dur >= 0.5:
+                    rescued = True
+                else:
+                    self.stats["not_you"] += 1
+                    out["why"] = "not your voice"
+                    return out
 
         # 3. What was said?
         text, took = self.whisper.transcribe(samples)
         out["stt_s"] = round(took, 2)
+        if rescued and not parse_wake(text)[0]:
+            self.stats["not_you"] += 1
+            out["why"] = "not your voice"
+            return out
         if is_hallucination(text):
             out["why"] = "nothing intelligible"
             return out
 
         # She is waiting for a yes or no. Only an ENROLLED voice may answer:
         # without a voiceprint anyone -- or any video -- could say "yes".
-        if self.approval_pending and score is not None:
+        if self.approval_pending and score is not None and not rescued:
             import nova_gate
             verdict = nova_gate.spoken_answer(text)
             if verdict is not None:
@@ -448,9 +537,13 @@ class Ears:
         in_followup = started < self.followup_until
         listening = started < self.armed_until or in_followup or self.held is not None
         woke, rest = parse_wake(text)
+        if (woke and score is not None and self.cfg.get("learn_voice") and dur >= 1.0
+                and getattr(self.speaker, "base", 0.0) >= float(self.cfg["speaker_threshold"])):
+            self.speaker.learn()
 
         if woke and len(rest) >= 2:
-            out.update(action="request", request=rest, text=text, why="wake + request")
+            out.update(action="request", request=rest, text=text,
+                       why="wake + request" + (" (near-miss voice, name heard)" if rescued else ""))
         elif woke:
             self.armed_until = now + float(self.cfg["armed_seconds"])
             out.update(action="armed", text=text, why="name only -- waiting for the request")
@@ -469,7 +562,27 @@ class Ears:
             self.armed_until = 0.0
             self.followup_until = 0.0
             self.stats["requests"] += 1
+            self.keep(samples, text, score)
         return out
+
+    def keep(self, samples: np.ndarray, text: str, score) -> None:
+        """Keep his last few requests (sound + what she wrote) on this PC only,
+        so her hearing can be measured on his real voice: setup/ears_bench.py --heard."""
+        n = int(self.cfg.get("keep_heard") or 0)
+        if n <= 0 or getattr(getattr(self, "bridge", None), "dry", True) or os.environ.get("NOVA_TEST"):
+            return
+        try:
+            HEARD.mkdir(exist_ok=True)
+            stem = HEARD / time.strftime("%Y%m%d-%H%M%S")
+            np.save(str(stem) + ".npy", (np.clip(samples, -1, 1) * 32767).astype(np.int16))
+            Path(str(stem) + ".json").write_text(json.dumps(
+                {"text": text, "score": score, "model": self.whisper.name,
+                 "logprob": round(getattr(self.whisper, "last_logprob", 0.0), 3)}), encoding="utf-8")
+            for f in sorted(HEARD.glob("*.npy"))[:-n]:
+                f.unlink(missing_ok=True)
+                f.with_suffix(".json").unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # A request is not sent the instant the VAD ends the clip. People pause
     # mid-sentence, and the pause used to send half a request and discard the

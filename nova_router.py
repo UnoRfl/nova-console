@@ -110,6 +110,7 @@ TOOLS = re.compile(_words(
     # Putting something on his screen, or asking her to just do it.
     r"in front", r"to the front", r"bring (?:it|that|this|them)? ?(?:up|forward|back)", r"pull (?:it|that)? ?up",
     r"put (?:it|that|this) (?:up|on|in)", r"can'?t see", r"cannot see", r"don'?t see", r"show (?:it|that|this|the)",
+    r"camera", r"webcam", r"see me", r"look at me", r"what am i holding", r"how do i look",
     r"lyrics", r"automatically", r"holidays?", r"suspen\w*", r"walang pasok", r"pasok",
     r"no school", r"school today", r"school tomorrow", r"classes? (?:today|tomorrow)", r"meetings?", r"appointments?", r"events?", r"plans?", r"trip", r"posted", r"facebook", r"fb", r"for me", r"do (?:that|this)", r"handle it"))
 
@@ -377,7 +378,9 @@ class Router:
             chain.append(("local", ""))
         # fallbacks, in cost order, for when the first choice cannot run
         if tier == "chat":
-            chain += [("claude", "haiku"), ("codex", "low")]
+            # The local model stays the last resort when chat is routed to
+            # Claude (config routing.chat), so she can still talk with Claude down.
+            chain += [("claude", "haiku"), ("codex", "low"), ("local", "")]
         else:
             chain += [("codex", CODEX_EFFORT.get(tier, "medium")), ("claude", "haiku"), ("local", "")]
         ok = {"claude": claude_ok, "codex": codex_ok, "local": local_ok}

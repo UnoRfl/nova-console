@@ -63,10 +63,22 @@ def reset():
     ears.held = None
 
 
-# Outside any window: 0.40 is still rejected, so strangers can't wake her.
+# Outside any window a near-miss (2026-11-15: his own voice had drifted to
+# 0.33-0.45 and he was being ignored) is taken ONLY if it starts with her name.
 reset(); ears.speaker.value = 0.40; ears.whisper.text = "nova open chrome"
-check("outside a window, 0.40 is still not you",
+check("outside a window, 0.40 saying her name is rescued",
+      ears.decide(clip, now=NOW)["action"] == "request")
+reset(); ears.speaker.value = 0.40; ears.whisper.text = "open chrome for me"
+check("outside a window, 0.40 without her name is still not you",
       ears.decide(clip, now=NOW)["why"] == "not your voice")
+# Other voices saying "Nova" measure 0.04-0.27 (replay_test): under the rescue bar.
+reset(); ears.speaker.value = 0.30; ears.whisper.text = "nova open chrome"
+check("outside a window, a 0.30 voice saying her name is refused",
+      ears.decide(clip, now=NOW)["why"] == "not your voice")
+reset(); ears.speaker.value = 0.40; ears.approval_pending = True; ears.whisper.text = "nova yes"
+check("a near-miss voice cannot answer her yes/no",
+      ears.decide(clip, now=NOW)["action"] != "answer")
+ears.approval_pending = False
 
 # After a bare "Nova": the request at 0.40 / 0.44 (the scores from the log) gets through.
 for s in (0.378, 0.443):

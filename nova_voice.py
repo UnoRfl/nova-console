@@ -81,9 +81,19 @@ ACKS = {
     "cancel":   ["Very well. I shall leave it.", "Cancelled, Sir."],
     "error":    ["I am afraid that did not work, Sir."],
 }
+STOCK = {line for group in ACKS.values() for line in group}
 
 
 ON_FAILURE = None           # set by the bridge: called with a reason when she could not speak
+ON_EVENT = None             # set by the bridge: one log line whenever the speaking voice changes
+
+
+def _note(msg: str) -> None:
+    if ON_EVENT:
+        try:
+            ON_EVENT(msg)
+        except Exception:                             # noqa: BLE001
+            pass
 
 
 def load_cfg() -> dict:
@@ -187,7 +197,16 @@ def synth_eleven(text: str, cfg: dict, timeout: float = 12) -> np.ndarray:
         return _trim(decode_audio(res.read()))
 
 
-def synth_edge(text: str, cfg: dict, voice: str | None = None, timeout: float = 10) -> np.ndarray:
+def synth_edge(text: str, cfg: dict, voice: str | None = None, timeout: float = 5.0,
+               tries: int = 2) -> np.ndarray:
+    """One sentence from Microsoft's voice.
+
+    Measured 2026-11-15: a sentence normally arrives in 0.3 s, but about one
+    connection in twenty stalls for 4-11 s. With a single 10 s attempt that
+    stall became a timeout, the sentence was spoken by the offline voice
+    instead, and Sir heard her change voices. A stalled connection is
+    abandoned early and asked again on a fresh one, which is fast.
+    """
     import asyncio
     import edge_tts
     pct = round((float(cfg["speed"]) - 1.0) * 100)
@@ -200,10 +219,17 @@ def synth_edge(text: str, cfg: dict, voice: str | None = None, timeout: float = 
                 data += chunk["data"]
         return data
 
-    data = asyncio.run(asyncio.wait_for(run(), timeout))
-    if not data:
-        raise RuntimeError("edge returned no audio")
-    return _trim(decode_audio(data))
+    last: Exception = RuntimeError("edge returned no audio")
+    for n in range(max(1, tries)):
+        try:
+            data = asyncio.run(asyncio.wait_for(run(), timeout + 2.0 * n))
+            if data:
+                return _trim(decode_audio(data))
+        except Exception as exc:                      # noqa: BLE001
+            last = exc if str(exc) else RuntimeError(f"{type(exc).__name__} after {timeout + 2.0 * n:.0f}s")
+            if getattr(exc, "status", 0) in (401, 403):
+                break                                 # refused, not slow: asking again will not help
+    raise last
 
 
 def sentences(text: str) -> list[str]:
@@ -272,7 +298,14 @@ class Voice:
         self.active = False
         self.speaking = False
         self.level = 0.0                      # live loudness, for the HUD's visuals
-        self.cache: dict[str, np.ndarray] = {}
+        # Stock lines, kept with the engine that voiced them. They used to be
+        # kept bare: synthesised once at start-up, and if the internet was not
+        # up yet they were in the offline voice for the rest of the day, so
+        # "Right away, Sir" and the answer after it were two different women.
+        self.cache: dict[str, tuple[str, np.ndarray]] = {}
+        self.out: set[str] = set()            # cloud engines that failed; a probe brings them back
+        self._probing = False
+        self.probe_wait = 30.0                # seconds before the first probe of a failed voice
         self._ack_i = 0
         self.down: dict[str, float] = {}      # cloud engine -> do not retry before this time
         self.last_engine = ""                 # which engine actually produced the last sentence
@@ -286,7 +319,44 @@ class Voice:
                  "edge": ["edge", "kokoro"]}.get(want, ["kokoro"])
         now = time.time()
         return [e for e in order
-                if e == "kokoro" or (now >= self.down.get(e, 0) and (e != "elevenlabs" or eleven_key()))]
+                if e == "kokoro" or (e not in self.out and now >= self.down.get(e, 0)
+                                     and (e != "elevenlabs" or eleven_key()))]
+
+    def _revive(self, eng: str) -> None:
+        """Bring a failed cloud voice back, quietly and between replies.
+
+        It used to be retried inside the next reply after 60 s: during an outage
+        that cost a long wait every minute, and when it worked the voice changed
+        back in the middle of a conversation. Now a background probe asks, and
+        the voice only returns once it answers AND she is not mid-reply.
+        """
+        if self._probing:
+            return
+        self._probing = True
+
+        def work() -> None:
+            wait = self.probe_wait
+            try:
+                while eng in self.out:
+                    time.sleep(wait)
+                    try:
+                        if eng == "edge":
+                            synth_edge("Testing.", self.cfg, timeout=5.0, tries=1)
+                        else:
+                            if not eleven_key():
+                                continue
+                            synth_eleven("Testing.", self.cfg)
+                    except Exception:                 # noqa: BLE001
+                        wait = min(wait * 1.5, 300.0)
+                        continue
+                    while self.active:                # never change voice inside a reply
+                        time.sleep(0.5)
+                    self.out.discard(eng)
+                    _note(f"voice: {eng} is answering again; back to her usual voice")
+            finally:
+                self._probing = False
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------------------------------------------------------- loading
     def load(self) -> bool:
@@ -315,7 +385,7 @@ class Voice:
             for group in ACKS.values():
                 for line in group:
                     try:
-                        self.cache[line] = self.synth(line)
+                        self.synth(line)              # synth() keeps stock lines itself
                     except Exception:                 # noqa: BLE001
                         pass
         threading.Thread(target=work, daemon=True).start()
@@ -329,7 +399,8 @@ class Voice:
                 "voice": {"edge": self.cfg["edge_voice"], "elevenlabs": self.cfg["eleven_voice"]}.get(
                     engine, self.cfg["voice"]),
                 "speaking": self.speaking, "active": self.active,
-                "level": round(self.level, 3), "error": self.error, "fault": self.last_fault}
+                "level": round(self.level, 3), "error": self.error, "fault": self.last_fault,
+                "out": sorted(self.out)}
 
     def voices(self) -> list[str]:
         return sorted(self.k.get_voices()) if self.load() and self.k is not None else []
@@ -341,10 +412,13 @@ class Voice:
         `voice` names a voice for whichever engine it belongs to (an Edge
         voice has "Neural" in it); `engine` forces one engine, for samples.
         """
-        if text in self.cache and voice is None and engine is None:
-            return self.cache[text]
+        chain = [engine] if engine else self.chain()
+        plain = voice is None and engine is None
+        hit = self.cache.get(text) if plain else None
+        if hit and hit[0] == chain[0]:                # only if it is in the voice she is using now
+            return hit[1]
         said = pronounce(text)
-        for eng in ([engine] if engine else self.chain()):
+        for eng in chain:
             try:
                 if eng == "elevenlabs":
                     audio = synth_eleven(said, self.cfg)
@@ -360,15 +434,21 @@ class Voice:
                     audio = np.asarray(samples, dtype=np.float32)
                 if not len(audio):
                     raise RuntimeError("no audio")
-                self.last_engine = eng
+                if plain and eng != self.last_engine and self.last_engine:
+                    _note(f"voice: speaking with {eng} (was {self.last_engine})")
+                if plain:
+                    self.last_engine = eng
+                    if text in STOCK:
+                        self.cache[text] = (eng, audio)
                 return audio
             except Exception as exc:                  # noqa: BLE001
                 self.last_fault = f"{eng}: {type(exc).__name__}: {str(exc)[:140]}"
                 if eng != "kokoro" and not engine:
-                    # Offline, out of credit, or a bad key: stop asking for a
-                    # while so every sentence does not pay the timeout again.
-                    code = getattr(exc, "code", 0)
-                    self.down[eng] = time.time() + (900 if code in (401, 402, 403, 429) else 60)
+                    # Offline, refused, or out of credit: stop asking inside
+                    # replies. The probe brings it back when it answers again.
+                    self.out.add(eng)
+                    _note(f"voice: {self.last_fault[:120]} -- using the offline voice until it answers again")
+                    self._revive(eng)
         raise RuntimeError(self.last_fault or "no voice engine could speak")
 
     # --------------------------------------------------------- playback

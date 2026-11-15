@@ -72,6 +72,10 @@ TIERS = {
     "list_page_watches": "free", "watch_page": "announce", "stop_page_watch": "announce",
     "class_schedule": "free", "school_days": "free", "stock_quote": "free",
     "spotify_play": "announce",
+    "habits": "free",
+    # Her eyes: one still from his webcam. "announce" so it is never silent,
+    # and not in TAINT_OK, so a web page she has just read cannot make her look.
+    "look_through_camera": "announce",
     # Hands. Looking and reading are free. Driving her own sandboxed Chrome is
     # "announce". Driving Sir's real desktop is "confirm": allowed while
     # ask_first is off, but refused by the gate once she has read untrusted
@@ -1059,6 +1063,36 @@ def spotify_play(query: str, kind: str = "auto") -> str:
     return nova_spotify.play_in_child(str(query), str(kind or "auto"))
 
 
+def habits() -> str:
+    """What you have noticed about how Sir uses this PC: how long he has been sitting now,
+    today's hours per app, the last week, his usual hours, late nights, and what he plays
+    on Spotify (artists, songs on repeat, the last song). Use it for "how long have I been
+    on", "what do I usually listen to", "play something I'd like", "do I sleep enough"."""
+    import nova_care
+    r = bridge("/api/habits")
+    return r.get("report") or nova_care.report()
+
+
+def look_through_camera() -> str:
+    """Your eyes: take ONE still picture with Sir's webcam and return its file path. Read
+    that path to actually see it. Use it only when he asks you to look at him, at something
+    he is holding up, or at the room ("look at this", "can you see me", "what am I holding",
+    "how do I look"). The camera is on for about a second; never call it on your own
+    initiative or repeatedly, and say you are looking before you do."""
+    import nova_eyes
+    r = nova_eyes.look()
+    try:
+        with open(ROOT / "eyes.log", "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M:%S  ") + (r.get("path") or r.get("error") or "?") + "\n")
+    except OSError:
+        pass
+    if r.get("error"):
+        return r["error"]
+    dark = " It came out very dark; the room light may be off or the lens covered." if r["brightness"] < 0.08 else ""
+    return (f"Picture taken with {r['camera']}: {r['path']}\nRead that file to see it.{dark} "
+            "It stays on this PC. Describe what you see plainly and kindly; do not guess who other people are.")
+
+
 def desktop_look(window: str = "") -> str:
     """Numbered list of the buttons, menus, tabs and text boxes in a window (default: the one
     in front). Use it before desktop_click / desktop_type. Works in any normal Windows app,
@@ -1279,7 +1313,7 @@ ALL = [web_research, web_find, web_text, web_extract, watch_page, list_page_watc
        save_note, recent_files, notes_start, notes_stop,
        class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read, gmail_send, gmail_reply,
-       whatsapp_chats, whatsapp_read, spotify_play, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
+       whatsapp_chats, whatsapp_read, spotify_play, habits, look_through_camera, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
        remind, list_reminders, cancel_reminder, schedule_meeting, list_meetings, cancel_meeting, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
