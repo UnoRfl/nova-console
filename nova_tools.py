@@ -73,6 +73,7 @@ TIERS = {
     "class_schedule": "free", "school_days": "free", "stock_quote": "free",
     "spotify_play": "announce",
     "habits": "free",
+    "tv": "announce",             # Sir's LG TV on the home Wi-Fi (nova_tv.py)
     # Her eyes: one still from his webcam. "announce" so it is never silent,
     # and not in TAINT_OK, so a web page she has just read cannot make her look.
     "look_through_camera": "announce",
@@ -1063,6 +1064,20 @@ def spotify_play(query: str, kind: str = "auto") -> str:
     return nova_spotify.play_in_child(str(query), str(kind or "auto"))
 
 
+def tv(action: str, value: str = "") -> str:
+    """Control Sir's LG TV over the home Wi-Fi (already paired; it reconnects by itself and
+    turns the TV on first when needed). action + value:
+    "status" | "on" | "off" | "volume" + 0-100 | "volume_up"/"volume_down" + steps |
+    "mute"/"unmute" | "app" + name ("youtube", "netflix", "disney+", "hbo max", any app
+    title) | "youtube" + a YouTube link or search words | "url" + a web address (shows a
+    page on the TV) | "input" + "hdmi 1"/"hdmi 2"/"hdmi 3" | "toast" + a short message to
+    pop up on the screen | "play"/"pause"/"stop" | "button" + HOME/BACK/UP/DOWN/LEFT/RIGHT/
+    ENTER | "apps" (list them). Someone else may be watching: do not switch, mute or turn
+    it off unless Sir asked."""
+    import nova_tv
+    return nova_tv.run(str(action), str(value or ""))
+
+
 def habits() -> str:
     """What you have noticed about how Sir uses this PC: how long he has been sitting now,
     today's hours per app, the last week, his usual hours, late nights, and what he plays
@@ -1313,7 +1328,7 @@ ALL = [web_research, web_find, web_text, web_extract, watch_page, list_page_watc
        save_note, recent_files, notes_start, notes_stop,
        class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read, gmail_send, gmail_reply,
-       whatsapp_chats, whatsapp_read, spotify_play, habits, look_through_camera, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
+       whatsapp_chats, whatsapp_read, spotify_play, tv, habits, look_through_camera, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
        remind, list_reminders, cancel_reminder, schedule_meeting, list_meetings, cancel_meeting, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
