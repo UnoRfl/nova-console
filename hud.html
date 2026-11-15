@@ -549,11 +549,24 @@
     animation: pane-in .3s var(--ease) both;
   }
   .activity[hidden] { display: none !important; }
-  .act { display: flex; gap: 10px; align-items: baseline; animation: act-in .28s var(--ease) both; }
+  .act { display: flex; flex-wrap: wrap; gap: 0 10px; align-items: baseline; animation: act-in .28s var(--ease) both; }
   @keyframes act-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
   .act .mark { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-dim); font-size: 0; transform: translateY(-1px); }
   .act .what { color: var(--ink); flex: none; font-weight: 500; }
-  .act .detail { color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+  .act .detail { flex: 1 1 0; min-width: 0; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+  /* Tool cards: click a tool row to see what it was given and what came back. */
+  .act.card { cursor: pointer; border-radius: 8px; margin: 0 -6px; padding: 1px 6px; transition: background .18s var(--ease); }
+  .act.card:hover { background: rgba(255,255,255,.045); }
+  .act .chev { flex: none; color: var(--ink-dim); font-size: 10px; transition: transform .2s var(--ease); }
+  .act.open .chev { transform: rotate(90deg); }
+  .act .body { display: none; flex: 1 0 100%; margin: 5px 0 6px 16px; cursor: auto; }
+  .act.open .body { display: block; }
+  .act .body .lbl { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-dim); margin: 4px 0 3px; }
+  .act .body pre { margin: 0; max-height: 150px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    font-family: var(--mono); font-size: 11px; line-height: 1.45; color: var(--ink-mid);
+    background: rgba(0,0,0,.22); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
+  .act.failed .body pre.out { color: #ffb3c0; border-color: rgba(255,90,120,.3); }
+  .activity.has-open { max-height: 230px; }
   .act.running .mark { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: breathe 1s ease-in-out infinite; }
   .act.done .mark { background: #6ef2c0; }
   .act.failed .mark { background: var(--alert); }
@@ -5001,6 +5014,33 @@
   // -- and this renders it live, so a twelve-second answer shows its working
   // instead of looking frozen.
   let lastAct = null;
+  const actById = new Map();     // tool_use id -> its row, so parallel tools close the right card
+
+  function cardSection(row, label, text, cls) {
+    let body = row.querySelector(".body");
+    if (!body) {
+      body = document.createElement("div");
+      body.className = "body";
+      body.addEventListener("click", (ev) => ev.stopPropagation());   // selecting text must not fold it
+      row.append(body);
+      const chev = document.createElement("span");
+      chev.className = "chev";
+      chev.textContent = "\u25B8";
+      row.insertBefore(chev, body);
+      row.classList.add("card");
+      row.addEventListener("click", () => {
+        row.classList.toggle("open");
+        els.activity.classList.toggle("has-open", !!els.activity.querySelector(".act.open"));
+      });
+    }
+    const lbl = document.createElement("div");
+    lbl.className = "lbl";
+    lbl.textContent = label;
+    const pre = document.createElement("pre");
+    if (cls) pre.className = cls;
+    pre.textContent = text;
+    body.append(lbl, pre);
+  }
 
   function actLine(kind, what, detail) {
     // The projector block is machinery. It arrives mid-stream on more than one
@@ -5032,14 +5072,19 @@
 
     row.append(mark, w, d);
     els.activity.hidden = false;
-    els.activity.append(row);
-    els.activity.scrollTop = els.activity.scrollHeight;
+    // Follow new work, unless he has scrolled up or opened a card to read it.
+    const a = els.activity;
+    const atEnd = a.scrollHeight - a.scrollTop - a.clientHeight < 24;
+    a.append(row);
+    if (atEnd || !a.classList.contains("has-open")) a.scrollTop = a.scrollHeight;
     return row;
   }
 
   function clearActivity() {
     els.activity.textContent = "";
     els.activity.hidden = true;
+    els.activity.classList.remove("has-open");
+    actById.clear();
     lastAct = null;
   }
 
@@ -5063,11 +5108,16 @@
         if (lastAct) lastAct.classList.remove("running");
         lastAct = actLine("tool", e.text, e.detail);
         lastAct.classList.add("running");
+        if (e.id) actById.set(e.id, lastAct);
+        if (e.input) cardSection(lastAct, "Input", e.input);
       } else if (e.kind === "tool_done") {
-        if (lastAct) {
-          lastAct.classList.remove("running");
-          lastAct.classList.add(e.text === "error" ? "failed" : "done");
-          lastAct.querySelector(".mark").textContent = e.text === "error" ? "x" : "+";
+        const row = (e.id && actById.get(e.id)) || lastAct;
+        if (row) {
+          row.classList.remove("running");
+          row.classList.add(e.text === "error" ? "failed" : "done");
+          row.querySelector(".mark").textContent = e.text === "error" ? "x" : "+";
+          if (e.output || row.classList.contains("card"))
+            cardSection(row, e.text === "error" ? "Error" : "Output", e.output || "(nothing returned)", "out");
         }
       } else if (e.kind === "text") {
         if (lastAct) lastAct.classList.remove("running");

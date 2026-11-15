@@ -1268,6 +1268,69 @@ def describe_tool(name: str, params: dict) -> str:
     return ""
 
 
+# The panel's tool cards open to show what a tool was given and what it gave
+# back. Both are cut short and anything shaped like a key is masked first: the
+# panel is reachable from the phone, and a Read of a config file must not put
+# a live token on screen.
+_SECRET_SHAPES = re.compile(
+    r"(sk-[a]nt-[A-Za-z0-9_\-]{8,}|sk-[A-Za-z0-9_\-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}|xox[abpr]-[A-Za-z0-9\-]{10,}|AKIA[0-9A-Z]{16}"
+    r"|AIza[0-9A-Za-z_\-]{30,}|\b\d{8,10}:[A-Za-z0-9_\-]{30,}"
+    r"|[A-Za-z0-9_\-]{24,28}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}"
+    r"|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,})")
+_SECRET_FIELDS = re.compile(
+    r"((?:token|secret|password|passwd|api[_-]?key|auth|bearer|cookie|session)[\"']?\s*[:=]\s*[\"']?)"
+    r"([^\s\"',;&]{6,})", re.IGNORECASE)
+
+
+def mask_secrets(text: str) -> str:
+    text = _SECRET_SHAPES.sub("[hidden]", str(text or ""))
+    text = _SECRET_FIELDS.sub(lambda m: m.group(1) + "[hidden]", text)
+    try:
+        tok = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if len(tok) >= 8:
+            text = text.replace(tok, "[hidden]")
+    except OSError:
+        pass
+    return text
+
+
+def _cut(text: str, keep: int) -> str:
+    text = str(text or "").strip()
+    if len(text) > keep:
+        text = text[:keep].rstrip() + f"\n... ({len(text) - keep} more characters)"
+    return text
+
+
+def preview_input(params) -> str:
+    """What a tool was handed, readable: Bash shows its command, the rest JSON."""
+    if not isinstance(params, dict) or not params:
+        return ""
+    if set(params) <= {"command", "description", "timeout", "run_in_background"} and "command" in params:
+        body = str(params["command"])
+    else:
+        try:
+            body = json.dumps(params, indent=2, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            body = str(params)
+    return mask_secrets(_cut(body, 1500))
+
+
+def preview_output(content) -> str:
+    """What a tool gave back, as text (images become a placeholder)."""
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if not isinstance(c, dict):
+                parts.append(str(c))
+            elif c.get("type") == "text":
+                parts.append(str(c.get("text", "")))
+            elif c.get("type") == "image":
+                parts.append("[image]")
+        content = "\n".join(parts)
+    return mask_secrets(_cut(content if content is not None else "", 2500))
+
+
 REMIND_ME = re.compile(r"^\s*(?:nova\b[\s,]*)?(?:please\s+)?remind me\s+(?:to\s+|that\s+|about\s+)?(.+)$",
                        re.IGNORECASE | re.DOTALL)
 REMIND_STRIP = re.compile(
@@ -1401,16 +1464,18 @@ class Activity:
         self.seq = 0
         self.lock = threading.Lock()
 
-    def push(self, kind: str, text: str = "", detail: str = "") -> None:
+    def push(self, kind: str, text: str = "", detail: str = "", **extra) -> None:
         with self.lock:
             self.seq += 1
-            self.events.append({
+            event = {
                 "seq": self.seq,
                 "at": time.time(),
                 "kind": kind,
                 "text": text,
                 "detail": detail,
-            })
+            }
+            event.update({k: v for k, v in extra.items() if v not in (None, "")})
+            self.events.append(event)
             if len(self.events) > self.LIMIT:
                 del self.events[: len(self.events) - self.LIMIT]
 
@@ -1618,7 +1683,9 @@ class Backend:
                         self.turn_tools += 1
                         name = block.get("name", "tool")
                         self.turn_trace.append(nova_skills.describe_call(name, block.get("input")))
-                        self.activity.push("tool", name, describe_tool(name, block.get("input")))
+                        self.activity.push("tool", name, describe_tool(name, block.get("input")),
+                                           id=block.get("id"),
+                                           input=preview_input(block.get("input")))
                         # Whatever she said before reaching for the tool ("Opening
                         # Notepad now, Sir") is spoken now, while the tool runs --
                         # not held back because it lacked a full stop.
@@ -1641,7 +1708,9 @@ class Backend:
                 for block in (event.get("message") or {}).get("content") or []:
                     if block.get("type") == "tool_result":
                         bad = bool(block.get("is_error"))
-                        self.activity.push("tool_done", "error" if bad else "ok")
+                        self.activity.push("tool_done", "error" if bad else "ok",
+                                           id=block.get("tool_use_id"),
+                                           output=preview_output(block.get("content")))
                         if bad and self.turn_trace:
                             res = block.get("content")
                             if isinstance(res, list):
