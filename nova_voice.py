@@ -298,6 +298,8 @@ class Voice:
         self.active = False
         self.speaking = False
         self.level = 0.0                      # live loudness, for the HUD's visuals
+        self.saying = ""                      # the sentence coming out of the speakers now (orb mood)
+        self._chunk_text: dict[int, str] = {}  # id(audio chunk) -> its sentence, until it plays
         # Stock lines, kept with the engine that voiced them. They used to be
         # kept bare: synthesised once at start-up, and if the internet was not
         # up yet they were in the offline voice for the rest of the day, so
@@ -478,6 +480,7 @@ class Voice:
                 waited = 0.0
                 if chunk is None:
                     return False
+                self.saying = self._chunk_text.pop(id(chunk), self.saying)
                 self.speaking = True
                 for i in range(0, len(chunk), block):
                     if self.stop_flag.is_set():
@@ -660,6 +663,9 @@ class SpeechStream:
                             if first_audio[0] is None:
                                 first_audio[0] = time.time() - began
                             spoken[0] += 1
+                            if len(v._chunk_text) > 64:
+                                v._chunk_text.clear()
+                            v._chunk_text[id(chunk)] = part
                             while not stopped():
                                 try:
                                     audio.put(chunk, timeout=0.1)
@@ -700,6 +706,7 @@ class SpeechStream:
             v.speaking = False
             v.active = False
             v.level = 0.0
+            v.saying = ""
         self.done.set()
 
 

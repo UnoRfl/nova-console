@@ -83,6 +83,81 @@ STATES = {
 CAPTION = {"listening": "LISTENING", "thinking": "THINKING", "speaking": "SPEAKING",
            "approval": "YOUR CALL", "offline": "OFFLINE", "idle": ""}
 
+# Flavour on top of the mode (named by nova_mood in the bridge): the tool she
+# is holding while she thinks, or the tone of the sentence she is saying. Each
+# has its own colour AND its own motion, so a change is seen, not just noticed.
+#   spin     multiplies the mode's spin       bloom  size of the inner glow
+#   pulse    beat | double | breathe | tick | ""   (how `drive` throbs)
+#   move     sweep | bob | shake | droop | iris | orbit | ""
+FLAVOURS = {
+    # while she works
+    "searching": {"accent": (0x4d, 0xd8, 0xff), "spin": 1.5, "bloom": 1.0, "pulse": "", "move": "sweep",
+                  "caption": "SEARCHING"},
+    "music":     {"accent": (0x3d, 0xf5, 0xa0), "spin": 1.0, "bloom": 1.1, "pulse": "beat", "move": "",
+                  "caption": "ON IT"},
+    "hands":     {"accent": (0x5b, 0x8c, 0xff), "spin": 1.2, "bloom": 1.0, "pulse": "tick", "move": "",
+                  "caption": "WORKING"},
+    "memory":    {"accent": (0xa6, 0x7b, 0xff), "spin": 0.7, "bloom": 1.15, "pulse": "breathe", "move": "",
+                  "caption": "REMEMBERING"},
+    "looking":   {"accent": (0xd8, 0xf0, 0xff), "spin": 0.8, "bloom": 1.0, "pulse": "", "move": "iris",
+                  "caption": "LOOKING"},
+    "talking":   {"accent": (0xff, 0xa8, 0x6b), "spin": 1.1, "bloom": 1.0, "pulse": "", "move": "orbit",
+                  "caption": "MESSAGING"},
+    "fault":     {"accent": (0xff, 0x5a, 0x5a), "spin": 0.9, "bloom": 0.9, "pulse": "", "move": "shake",
+                  "caption": "HMM"},
+    # while she speaks
+    "playful":   {"accent": (0xff, 0x6e, 0xc7), "spin": 1.5, "bloom": 1.05, "pulse": "", "move": "bob"},
+    "warm":      {"accent": (0xff, 0xb0, 0x8a), "spin": 0.7, "bloom": 1.25, "pulse": "breathe", "move": ""},
+    "sorry":     {"accent": (0x7a, 0xa6, 0xff), "spin": 0.55, "bloom": 0.8, "pulse": "", "move": "droop"},
+    "alert":     {"accent": (0xff, 0x8a, 0x2e), "spin": 1.6, "bloom": 1.05, "pulse": "double", "move": ""},
+    "done":      {"accent": (0xff, 0xe0, 0x6b), "spin": 1.2, "bloom": 1.15, "pulse": "", "move": ""},
+}
+FADE_S = 0.32            # colour crossfade: smooth, but over in a third of a second
+
+
+def _srgb_to_oklab(c):
+    lin = [((v / 255.0 + 0.055) / 1.055) ** 2.4 if v / 255.0 > 0.04045 else v / 255.0 / 12.92 for v in c]
+    r, g, b = lin
+    l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+
+
+def _oklab_to_srgb(lab):
+    L, a, b = lab
+    l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    lin = (4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+           -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+           -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
+    out = []
+    for v in lin:
+        v = max(0.0, min(1.0, v))
+        out.append(255.0 * (1.055 * v ** (1 / 2.4) - 0.055 if v > 0.0031308 else 12.92 * v))
+    return out
+
+
+def look_for(mode: str, flavour: str) -> dict:
+    """The mode's look with the flavour laid over it."""
+    base = dict(STATES.get(mode, STATES["idle"]))
+    base.update({"bloom": 1.0, "pulse": "", "move": "", "flavour": ""})
+    fl = FLAVOURS.get(flavour) if mode in ("thinking", "speaking") else None
+    if fl:
+        base["accent"] = fl["accent"]
+        base["spin"] = base["spin"] * fl["spin"]
+        base.update({"bloom": fl["bloom"], "pulse": fl["pulse"], "move": fl["move"], "flavour": flavour})
+    return base
+
+
+def caption_for(mode: str, flavour: str) -> str:
+    if mode == "thinking" and flavour in FLAVOURS and FLAVOURS[flavour].get("caption"):
+        return FLAVOURS[flavour]["caption"]
+    return CAPTION.get(mode, "")
+
 # ------------------------------------------------------------------ rendering
 
 _yy, _xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -114,10 +189,15 @@ def caption_mask(text: str) -> np.ndarray | None:
 
 
 class Core:
-    """The HUD's core object: eased colour and spin, integrated angles, surge."""
+    """The HUD's core object: crossfaded colour, eased spin, integrated angles, surge,
+    plus the flavour layer (its own motion, and a ripple whenever the look changes)."""
 
     def __init__(self) -> None:
         self.rgb = [192.0, 140.0, 255.0]
+        self.fade_from = _srgb_to_oklab(self.rgb)
+        self.fade_to = self.fade_from
+        self.fade_t = 1.0                                   # 0..1 through the current crossfade
+        self.target = tuple(int(v) for v in self.rgb)
         self.spin = 1.0
         self.phase = [i * 1.7 for i in range(len(RINGS))]   # each ring tilts on its own clock
         self.ring = [1.0] * len(RINGS)                      # presence, 0..1
@@ -126,7 +206,14 @@ class Core:
         self.burst = 0.0                                    # the star's own counter-rotation
         self.last = 0.0
         self.mode = ""
+        self.flavour = ""
         self.speak_env = 0.0
+        self.bloom = 1.0
+        self.fx = {"sweep": 0.0, "bob": 0.0, "shake": 0.0, "droop": 0.0, "iris": 0.0, "orbit": 0.0}
+        self.pulse_w = {"beat": 0.0, "double": 0.0, "breathe": 0.0, "tick": 0.0}
+        self.ripple = 1.0                                   # 0 = just changed, 1 = gone
+        self.ripple_rgb = np.array(self.rgb, dtype=np.float32) / 255.0
+        self.sweep_ang = 0.0
 
     def drive(self, mode: str, t: float, level: float) -> float:
         """How hard the core is being driven, per state -- the panel's numbers."""
@@ -142,31 +229,84 @@ class Core:
             return 0.38 + 0.24 * math.sin(t * 0.014)
         return 0.10 + 0.045 * math.sin(t * 0.0013)
 
+    def pulse(self, t: float) -> float:
+        """Extra drive from the flavour's rhythm, each weighted by how present it is."""
+        w = self.pulse_w
+        out = 0.0
+        if w["beat"] > 0.01:                                # ~120 bpm, a sharp kick
+            out += w["beat"] * 0.30 * max(0.0, math.sin(t * 0.01257)) ** 6
+        if w["double"] > 0.01:                              # da-dum ... da-dum
+            ph = (t % 1100) / 1100
+            out += w["double"] * 0.32 * (math.exp(-((ph - 0.05) / 0.04) ** 2) + math.exp(-((ph - 0.22) / 0.04) ** 2))
+        if w["breathe"] > 0.01:
+            out += w["breathe"] * 0.14 * (0.5 + 0.5 * math.sin(t * 0.0021))
+        if w["tick"] > 0.01:                                # a small click four times a second
+            out += w["tick"] * 0.12 * math.exp(-((t % 250) / 40))
+        return out
+
     def frame(self, t: float, mode: str, level: float, caption: str = "", caption_alpha: float = 0.0,
-              backing: float = 0.84) -> np.ndarray:
+              backing: float = 0.84, flavour: str = "") -> np.ndarray:
         """One frame as premultiplied BGRA (H, W, 4) uint8. t is in milliseconds."""
-        look = STATES.get(mode, STATES["idle"])
-        if mode != self.mode:
+        look = look_for(mode, flavour)
+        if mode != self.mode or look["flavour"] != self.flavour:
             if self.mode:
-                self.surge = 1.0                            # the rings wind up, then settle
-            self.mode = mode
+                self.surge = max(self.surge, 1.0 if mode != self.mode else 0.7)  # wind up, then settle
+                self.ripple = 0.0
+                if look["flavour"] == "done":
+                    self.surge = 1.2
+            self.mode, self.flavour = mode, look["flavour"]
 
         dt = max(1.0, min(80.0, t - (self.last or t)))
         self.last = t
         ease = 1 - math.exp(-dt / 190)
-        drive = self.drive(mode, t, level)
+        quick = 1 - math.exp(-dt / 140)
 
-        for i in range(3):
-            self.rgb[i] += (look["accent"][i] - self.rgb[i]) * ease
+        # ---- colour: a timed crossfade through OKLab, so violet -> cyan never
+        # passes through grey, and it is always over in FADE_S.
+        if tuple(look["accent"]) != self.target:
+            self.target = tuple(look["accent"])
+            self.fade_from = _srgb_to_oklab(self.rgb)
+            self.fade_to = _srgb_to_oklab(self.target)
+            self.fade_t = 0.0
+            self.ripple_rgb = np.array(self.target, dtype=np.float32) / 255.0
+        if self.fade_t < 1.0:
+            self.fade_t = min(1.0, self.fade_t + dt / (FADE_S * 1000))
+            k = self.fade_t * self.fade_t * (3 - 2 * self.fade_t)
+            lab = [a + (b - a) * k for a, b in zip(self.fade_from, self.fade_to)]
+            self.rgb = _oklab_to_srgb(lab)
+        else:
+            self.rgb = [float(v) for v in self.target]
+
         self.spin += (look["spin"] - self.spin) * ease
+        self.bloom += (look["bloom"] - self.bloom) * quick
+        for name in self.fx:
+            self.fx[name] += ((1.0 if look["move"] == name else 0.0) - self.fx[name]) * quick
+        for name in self.pulse_w:
+            self.pulse_w[name] += ((1.0 if look["pulse"] == name else 0.0) - self.pulse_w[name]) * quick
         self.surge *= math.exp(-dt / 430)
+        self.ripple = min(1.0, self.ripple + dt / 520)
         rush = 1 + self.surge * 2.4
+        drive = min(1.2, self.drive(mode, t, level) + self.pulse(t))
         accent = np.array(self.rgb, dtype=np.float32) / 255.0
+
+        # ---- motion: where the centre sits this frame
+        fx = self.fx
+        ox = fx["shake"] * 2.6 * math.sin(t * 0.09) * (0.6 + 0.4 * math.sin(t * 0.013))
+        oy = (fx["bob"] * 3.2 * abs(math.sin(t * 0.0105)) * -1
+              + fx["droop"] * 3.0
+              + fx["shake"] * 1.2 * math.sin(t * 0.071))
+        ccx, ccy = CX + ox, CY + oy
+        if abs(ox) > 0.01 or abs(oy) > 0.01:
+            dx, dy = _xx - ccx, _yy - ccy
+            dist = np.sqrt(dx * dx + dy * dy)
+        else:
+            dx, dy, dist = DX, DY, DIST
 
         # ---- the line work (rings, ticks, leading arcs, rim bars), supersampled
         lines = Image.new("L", (W * SS, H * SS), 0)
         d = ImageDraw.Draw(lines)
-        cx, cy = CX * SS, CY * SS
+        cx, cy = ccx * SS, ccy * SS
+        iris = 1 + fx["iris"] * 0.08 * math.sin(t * 0.0035)       # looking: the rings focus in and out
 
         for i, ring in enumerate(RINGS):
             wanted = 1.0 if i < look["rings"] else 0.0
@@ -176,7 +316,8 @@ class Core:
             if present < 0.015:
                 continue
 
-            rr = R * ring["r"] * (1 + drive * 0.030) * SS
+            ring_iris = iris if i % 2 else 2 - iris
+            rr = R * ring["r"] * (1 + drive * 0.030) * ring_iris * SS
             # the orbit: each ring leans through its own slow ellipse
             squash = 1 - ORBIT * (0.5 + 0.5 * math.sin(t * 0.00026 + self.phase[i]))
             ry = rr * squash
@@ -202,6 +343,25 @@ class Core:
             pts = [(cx + math.cos(ang + span * j / steps) * rr, cy + math.sin(ang + span * j / steps) * ry)
                    for j in range(steps + 1)]
             d.line(pts, fill=int(255 * present), width=max(2, round((ring["w"] + 1.2) * SS * 0.8)), joint="curve")
+
+        # searching: a radar sweep -- a bright wedge of short spokes racing round
+        if fx["sweep"] > 0.02:
+            self.sweep_ang += dt * 0.0062
+            for j in range(18):
+                th = self.sweep_ang - j * 0.045
+                a = fx["sweep"] * (1 - j / 18)
+                r0, r1 = R * 0.40 * SS, R * 0.95 * SS
+                d.line([cx + math.cos(th) * r0, cy + math.sin(th) * r0,
+                        cx + math.cos(th) * r1, cy + math.sin(th) * r1],
+                       fill=int(255 * 0.55 * a), width=SS)
+
+        # messaging: three sparks chasing each other round the outer ring
+        if fx["orbit"] > 0.02:
+            for j in range(3):
+                th = t * 0.0042 + j * 0.42
+                px, py = cx + math.cos(th) * R * 0.97 * SS, cy + math.sin(th) * R * 0.97 * 0.86 * SS
+                rad = (3.2 - j * 0.7) * SS
+                d.ellipse([px - rad, py - rad, px + rad, py + rad], fill=int(255 * fx["orbit"] * (1 - j * 0.25)))
 
         # rim bars: her voice, around the outside
         if mode == "speaking":
@@ -234,9 +394,17 @@ class Core:
             glass = np.clip((R * 1.16 - DIST) / (R * 0.20), 0, 1)
             add(glass * glass * (3 - 2 * glass) * backing, np.array([0.035, 0.015, 0.075], dtype=np.float32))
 
+        # the change ripple: a ring of the NEW colour that runs out from the core
+        if self.ripple < 1.0:
+            p = self.ripple
+            p_e = 1 - (1 - p) ** 3
+            rad = R * (0.30 + 0.85 * p_e)
+            band = np.clip(1 - np.abs(dist - rad) / (2.0 + 5.0 * p), 0, 1)
+            add(band * (1 - p) ** 1.5 * 0.9, self.ripple_rgb)
+
         # bloom
-        core_r = R * 0.34 * (1 + drive * 0.18)
-        x = np.clip(DIST / (core_r * 2.4), 0, 1)
+        core_r = R * 0.34 * (1 + drive * 0.18) * self.bloom
+        x = np.clip(dist / (core_r * 2.4), 0, 1)
         bloom_a = np.interp(x, [0, 0.20, 0.55, 1.0], [1.0, 0.80, 0.25, 0.0]).astype(np.float32)
         mix = np.clip((x - 0.20) / 0.35, 0, 1)[..., None]
         bloom_c = accent[None, None, :] * (1 - mix) + (np.array(MID, dtype=np.float32) / 255.0)[None, None, :] * mix
@@ -249,16 +417,17 @@ class Core:
 
         # the burst: four arms, long and short alternating, turning against the rings
         self.burst -= self.spin * rush * dt * 0.00028
+        wobble = fx["bob"] * 0.25 * math.sin(t * 0.0105)       # playful: the star waggles
         radius = core_r * 1.5
         white = np.array([1.0, 1.0, 1.0], dtype=np.float32)
         for k in range(4):
-            th = self.burst + (k / 4) * math.tau
+            th = self.burst + wobble + (k / 4) * math.tau
             long = k % 2 == 0
             length = radius * (1.0 if long else 0.52) * (1 + drive * 0.55)
             half = radius * (0.13 if long else 0.085)
             c, s = math.cos(th), math.sin(th)
-            u = DX * c + DY * s                               # along the arm
-            v = -DX * s + DY * c                              # across it
+            u = dx * c + dy * s                               # along the arm
+            v = -dx * s + dy * c                              # across it
             f = u / length
             cover = np.clip(half * (1 - f) - np.abs(v) + 0.6, 0, 1) * (u >= -0.5) * (f <= 1)
             fade = np.clip(1 - (f - 0.25) / 0.75, 0, 1)       # accent -> transparent past a quarter
@@ -269,7 +438,7 @@ class Core:
             alpha = alpha + m[..., 0] * (1 - alpha)
 
         # white-hot centre
-        hx = np.clip(DIST / (core_r * 0.42), 0, 1)
+        hx = np.clip(dist / (core_r * 0.42), 0, 1)
         heart_a = np.interp(hx, [0, 0.6, 1.0], [1.0, 1.0, 0.0]).astype(np.float32) * (0.85 + drive * 0.15)
         hmix = np.clip(hx / 0.6, 0, 1)[..., None]
         m = heart_a[..., None]
@@ -409,6 +578,11 @@ class Orb:
         self.last_active = 0.0                     # when she was last doing something
         self.blank = False                         # a fully faded frame has been pushed
         self.frames = 0
+        self.was_active = False
+        self.raised_at = 0.0
+        self._swp = ctypes.windll.user32.SetWindowPos
+        self._swp.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_int, ctypes.c_int, wintypes.UINT]
 
         self.core = Core()
         self.level = 0.0
@@ -530,7 +704,8 @@ class Orb:
         want = float(self.state.get("level", 0.0)) if mode == "speaking" else 0.0
         self.level += (want - self.level) * min(1.0, dt * (22 if want > self.level else 8))
 
-        text = CAPTION.get(mode, "")
+        flavour = str(self.state.get("flavour") or "")
+        text = caption_for(mode, flavour)
         if text and text == self.caption:
             self.caption_alpha = min(1.0, self.caption_alpha + dt * 5)
         else:
@@ -548,9 +723,18 @@ class Orb:
             self.apply_prefs(self.read_prefs())
         elif self.frames % 10 == 0:
             self.sync_prefs()
-        if mode not in ("idle", "offline"):
+        active = mode not in ("idle", "offline")
+        if active:
             self.last_active = now
         wanted = (not self.hidden) or now - self.last_active < LINGER
+        # Stay above every other window. "-topmost" is set once at start, and
+        # any other always-on-top window (the taskbar, a game, an overlay)
+        # that comes forward afterwards lands on top of her. So: re-assert it
+        # the moment she becomes active, and every second while she is shown.
+        if wanted and (active and not self.was_active or now - self.raised_at > 1.0):
+            self.raise_top()
+            self.raised_at = now
+        self.was_active = active
         if wanted:
             self.vis = min(1.0, self.vis + dt * 5.0)          # in: a fifth of a second
         else:
@@ -560,11 +744,20 @@ class Orb:
         if self.vis > 0.0 or not self.blank:                  # nothing to draw while she is away
             try:
                 self.surface.show(self.core.frame((now - self.t0) * 1000.0, mode, self.level,
-                                                  self.caption, self.caption_alpha))
+                                                  self.caption, self.caption_alpha, flavour=flavour))
                 self.blank = self.vis <= 0.0
             except Exception:                         # noqa: BLE001 -- never let a bad frame kill the orb
                 pass
         self.root.after(33 if self.vis > 0.0 else 120, self.tick)
+
+    def raise_top(self) -> None:
+        """Back to the top of the always-on-top band, without taking focus."""
+        HWND_TOPMOST = wintypes.HWND(-1)
+        flags = 0x0001 | 0x0002 | 0x0010 | 0x0200          # NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
+        try:
+            self._swp(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+        except Exception:                             # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------ pointer
     def press(self, e) -> None:
@@ -613,6 +806,36 @@ def preview(path: str) -> None:
             sheet.paste(Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)), (col * W, row * H))
     sheet.save(path)
     print("wrote", path)
+
+    # Every flavour, on the dark backdrop, plus a crossfade strip.
+    names = list(FLAVOURS)
+    cols = 6
+    rows = (len(names) + cols - 1) // cols + 1
+    sheet = Image.new("RGB", (W * cols, H * rows), (24, 26, 34))
+    for n, name in enumerate(names):
+        mode = "speaking" if name in ("playful", "warm", "sorry", "alert", "done") else "thinking"
+        core = Core()
+        for step in range(40):
+            bgra = core.frame(4000 + step * 33.0, mode, 0.09 if mode == "speaking" else 0.0,
+                              caption_for(mode, name) or name.upper(), 1.0, flavour=name)
+        bgra = bgra.astype(np.float32)
+        a = bgra[..., 3:4] / 255.0
+        rgb = bgra[..., [2, 1, 0]] + np.array((24, 26, 34), dtype=np.float32) * (1 - a)
+        sheet.paste(Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)), ((n % cols) * W, (n // cols) * H))
+    # the change itself: thinking/searching -> speaking/playful, every 66 ms
+    core = Core()
+    for step in range(40):
+        core.frame(1000 + step * 33.0, "thinking", 0.0, "", 0.0, flavour="searching")
+    for c in range(cols):
+        for _ in range(2):
+            bgra = core.frame(core.last + 33.0, "speaking", 0.09, "", 0.0, flavour="playful")
+        bgra = bgra.astype(np.float32)
+        a = bgra[..., 3:4] / 255.0
+        rgb = bgra[..., [2, 1, 0]] + np.array((24, 26, 34), dtype=np.float32) * (1 - a)
+        sheet.paste(Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)), (c * W, (rows - 1) * H))
+    alt = str(Path(path).with_name(Path(path).stem + "-flavours.png"))
+    sheet.save(alt)
+    print("wrote", alt)
 
 
 if __name__ == "__main__":

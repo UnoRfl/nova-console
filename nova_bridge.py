@@ -40,6 +40,7 @@ import nova_memory  # noqa: E402
 import nova_harness  # noqa: E402
 import nova_events  # noqa: E402
 import nova_presence  # noqa: E402
+import nova_mood  # noqa: E402
 import nova_router  # noqa: E402
 import nova_initiative  # noqa: E402
 import nova_schedule  # noqa: E402
@@ -1516,8 +1517,13 @@ class Activity:
         self.events: list[dict] = []
         self.seq = 0
         self.lock = threading.Lock()
+        self.mood = nova_mood.Tracker()     # the orb's colour flavour (tool in hand, tone of voice)
 
     def push(self, kind: str, text: str = "", detail: str = "", **extra) -> None:
+        try:
+            self.mood.on_event(kind, text, detail)
+        except Exception:                     # noqa: BLE001 -- cosmetic, never break the feed
+            pass
         with self.lock:
             self.seq += 1
             event = {
@@ -2671,7 +2677,11 @@ class Handler(BaseHTTPRequestHandler):
             # One word for what she is doing, for the on-screen orb.
             voice = nova_voice.shared() if nova_voice else None
             mode = self.server.mode()
-            out = {"mode": mode, "level": voice.level if voice else 0.0,
+            tracker = self.server.activity.mood
+            if voice:
+                tracker.on_saying(getattr(voice, "saying", ""))
+            out = {"mode": mode, "flavour": tracker.flavour(mode),
+                   "level": voice.level if voice else 0.0,
                    "brain": self.server.backend.brain,
                    "jobs": sum(1 for j in self.server.jobs.list() if j["state"] == "running")}
             if "panel=1" in self.path:
