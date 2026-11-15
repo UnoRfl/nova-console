@@ -1,4 +1,6 @@
-# N O V A
+<p align="center"><img src=".github/assets/banner.png" alt="nova-console banner" width="100%"></p>
+
+# <img src=".github/assets/icon.png" width="38" align="top" alt=""> N O V A
 
 **A voice-driven assistant that runs on your own PC.**
 
