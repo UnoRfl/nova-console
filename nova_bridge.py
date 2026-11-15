@@ -1858,6 +1858,9 @@ class Backend:
             return ""
         lines = []
         for x in missed:
+            if x["engine"] == "unprompted":
+                lines.append("You, on your own (he heard it): " + x["reply"][:400])
+                continue
             lines.append("Sir: " + x["user"][:400])
             lines.append("You: " + x["reply"][:400])
         # Sir, 2026-11-14: after a second task she reported the first one again
@@ -1866,13 +1869,23 @@ class Backend:
         return ("(Background only: earlier in this conversation, already answered by another of your "
                 "engines. Those requests are FINISHED and he has already heard the replies. Do not "
                 "repeat, summarise or mention them again unless he asks; answer only his new request, "
-                "which follows this note.\n"
-                + "\n".join(lines) + ")\n\nHis new request: ")
+                "which follows this note."
+                + (" You have already greeted him: do not say good morning (or afternoon/evening) "
+                   "again, and if he asks for updates give only what is NEW since."
+                   if any(x["engine"] == "unprompted" for x in missed) else "")
+                + "\n" + "\n".join(lines) + ")\n\nHis new request: ")
 
     def record(self, prompt: str, reply: str, key: str) -> None:
         self.turn_no += 1
         self.recent.append({"n": self.turn_no, "user": prompt, "reply": reply, "engine": key})
         self.recent = self.recent[-16:]
+
+    def note_spoken(self, text: str) -> None:
+        """Something she said on her own (briefing, welcome back, reminder).
+        Sir, 2026-11-15: she said good morning and briefed him, then on his
+        next question said good morning and briefed him again -- no engine
+        knew the first one had happened. Now every engine is told."""
+        self.record("", text[:600], "unprompted")
 
     def codex_ready(self) -> bool:
         return bool(nova_harness.codex_exe()) and (HOME / ".codex" / "auth.json").is_file()
@@ -1962,8 +1975,9 @@ class Backend:
             else:
                 # The local model gets the shared conversation as its history.
                 self.local_history = [m for x in self.recent[-6:] for m in
-                                      ({"role": "user", "content": x["user"][:600]},
-                                       {"role": "assistant", "content": x["reply"][:600]})]
+                                      ((({"role": "user", "content": x["user"][:600]},)
+                                        if x["engine"] != "unprompted" else ())
+                                       + ({"role": "assistant", "content": x["reply"][:600]},))]
                 out = self.ask_local(prompt, local, speak, routed=claude_ok)
                 if out.get("error") == "escalate":
                     tier, how = "normal", how + "+escalated"
@@ -3754,6 +3768,10 @@ def main() -> int:
             return
         activity.push("system", "Nova", text[:200])
         log(f"announce: {text[:160]}")
+        try:
+            backend.note_spoken(text)
+        except Exception:                             # noqa: BLE001
+            pass
         # Everything she says unprompted is also kept as a notice, so his
         # phone can show what he missed (GET /api/notices).
         with httpd.notice_lock:

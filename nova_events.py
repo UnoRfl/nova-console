@@ -281,6 +281,11 @@ class Events:
         self.missed: list[tuple[float, str]] = []   # said aloud while he was away: repeated when he is back
         self.returned = 0.0                # how long he was gone, set on the tick he comes back
         self.loops_told = ""               # the day open loops were last mentioned
+        # Sir, 2026-11-15: "Welcome back" and then "Good morning" twenty seconds
+        # later. When the day's briefing is about to play, what was waiting for
+        # him is folded into it instead of getting a greeting of its own.
+        self.for_brief: list[str] = []
+        self.for_brief_at = 0.0
         self.stack: dict = {}              # last known state of the headless PC's services
         self.headless_fails = 0
         self.headless_down = False
@@ -351,8 +356,15 @@ class Events:
             stale = time.time() - 120
             items = [t for at, t in self.missed if at < stale] + self.held
             self.held, self.missed = [], []
-        tail = ""
         today = time.strftime("%Y-%m-%d")
+        if self.for_brief and time.time() - self.for_brief_at > 600:
+            # The briefing never came (held, switched off): say them after all.
+            items, self.for_brief = self.for_brief + items, []
+        if back and items and self.brief_due(back):
+            self.for_brief += items
+            self.for_brief_at = time.time()
+            return
+        tail = ""
         if back >= 3600 and self.loops_told != today:
             tail = self.ni.loops_line()
             if tail:
@@ -442,6 +454,12 @@ class Events:
         def work():
             try:
                 text = self.nx.compose_briefing(self.nx.gather_briefing(self, since))
+                with self.lock:
+                    extra, self.for_brief = self.for_brief, []
+                extra = [re.sub(r"^Sir,\s*", "", i) for i in extra]
+                extra = [i[:1].upper() + i[1:] for i in extra if i.strip()]
+                if extra:
+                    text = text.rstrip() + " Also, while you were away: " + " ".join(extra)
                 s = self.nx.load_state()
                 s["briefed"], s["briefed_at"] = time.strftime("%Y-%m-%d"), time.time()
                 self.nx.save_state(s)
@@ -457,6 +475,18 @@ class Events:
 
         threading.Thread(target=work, daemon=True).start()
         return True
+
+    def brief_due(self, back: float) -> bool:
+        """Will coming back from this absence set off the day's briefing?"""
+        try:
+            c = self.nx.cfg()
+            briefed = str(self.nx.load_state().get("briefed") or "")
+        except Exception:                             # noqa: BLE001
+            return False
+        early = time.strftime("%H:%M") < str(c.get("briefing_from") or "05:00")
+        return (not TESTING and c.get("briefing") == "arrival" and not early
+                and briefed != time.strftime("%Y-%m-%d")
+                and back >= float(c.get("briefing_gap_hours", 3)) * 3600)
 
     def check_arrival(self) -> None:
         c = self.nx.cfg()
