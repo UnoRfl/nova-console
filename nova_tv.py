@@ -229,6 +229,10 @@ def run(action: str, value: str = "") -> str:
                 vid = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})", v)
                 if vid:
                     await cl.launch_app_with_content_id(APPS["youtube"], vid.group(1))
+                    # The YouTube app often opens the video paused on its page; OK starts it
+                    # (Sir had to ask for it on 2026-11-15).
+                    await asyncio.sleep(5)
+                    await cl.button("ENTER")
                     return "Playing that video on the TV."
                 await cl.launch_app_with_params(APPS["youtube"], {"contentTarget": f"https://www.youtube.com/results?search_query={v}"})
                 return f"Searched YouTube on the TV for {v}."
