@@ -53,7 +53,89 @@ DEFAULTS = {
     "watch_prs": [],              # e.g. ["owner/repo"]; needs the GitHub CLI signed in
     "narrate_jobs_minutes": 5,    # a spoken line on a long job this often; 0 = only when it ends
     "order_min_minutes": 5,       # a standing order is never checked more often than this
+    "repeat_guard_hours": 3,      # the same unprompted line is not said twice inside this
 }
+
+# ------------------------------------------------------------ repeat guard
+# Sir, 2026-11-17: "sometimes repeats reminders too many times". The log showed
+# the same line said again and again: "memory is at 9x percent" every ~10 min,
+# a class nudge three times in two minutes, "headless PC stopped answering"
+# five times in an hour (each bridge restart forgot it had been said), and two
+# near-identical reminders back to back. Every unprompted line now goes past
+# this guard, which survives restarts (announced.json).
+ANNOUNCED_FILE = ROOT / "announced.json"
+
+
+def say_key(text: str) -> str:
+    """What a line is about, ignoring the "Sir," and the numbers that drift."""
+    t = str(text or "").lower()
+    t = re.sub(r"^(while you were busy,?\s*)?(sir,?\s*)?(a reminder:\s*)?(sir,?\s*)?", "", t)
+    t = re.sub(r"\d+", "#", t)
+    t = re.sub(r"[^a-z# ]+", " ", t)
+    return " ".join(t.split())
+
+
+def similar(a: str, b: str) -> float:
+    import difflib
+    ka, kb = say_key(a), say_key(b)
+    if not ka or not kb:
+        return 0.0
+    return 1.0 if ka == kb else difflib.SequenceMatcher(None, ka, kb).ratio()
+
+
+class Recent:
+    """Lines said lately, so the same thing is not said twice in a window."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path if path is not None else (None if TESTING else ANNOUNCED_FILE)
+        self.lock = threading.Lock()
+        self.items: list[dict] = []
+        if self.path:
+            try:
+                import nova_safe
+                data = nova_safe.read_json(self.path, [])
+                self.items = [i for i in data if isinstance(i, dict) and "key" in i] if isinstance(data, list) else []
+            except Exception:                         # noqa: BLE001
+                self.items = []
+
+    def seen(self, text: str, window: float, now: float | None = None, ratio: float = 0.86) -> bool:
+        now = time.time() if now is None else now
+        key = say_key(text)
+        if not key:
+            return False
+        with self.lock:
+            for i in self.items:
+                if now - float(i.get("at") or 0) > window:
+                    continue
+                if i["key"] == key or similar(i["key"], key) >= ratio:
+                    return True
+        return False
+
+    def mark(self, text: str, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        key = say_key(text)
+        if not key:
+            return
+        with self.lock:
+            self.items = [i for i in self.items if now - float(i.get("at") or 0) < 2 * 86400][-300:]
+            self.items.append({"at": now, "key": key})
+            if self.path:
+                try:
+                    import nova_safe
+                    nova_safe.write_json(self.path, self.items)
+                except Exception:                     # noqa: BLE001
+                    pass
+
+
+def dedupe(lines: list[str], ratio: float = 0.86) -> list[str]:
+    """Keep the first of any lines that say the same thing (newest wording wins
+    for drifting numbers, so the LAST of a group is kept)."""
+    out: list[str] = []
+    for line in reversed(lines):
+        if not any(similar(line, o) >= ratio for o in out):
+            out.append(line)
+    return list(reversed(out))
+
 
 GAMES = {"robloxplayerbeta", "javaw", "valorant-win64-shipping", "valorant", "gamemd",
          "ra2", "fivem", "minecraft", "cs2", "mlbb"}
@@ -141,6 +223,10 @@ class Reminders:
             while any(i["id"] == ident for i in items):
                 ident = f"r{int(ident[1:]) + 1}"
             item = {"id": ident, "text": " ".join(text.split()), "at": at, "daily": daily, "kind": kind}
+            if not daily and weekly is None and not group:
+                # Asked twice in other words ("the trip" / "the vacation"): one reminder, the newer wording.
+                items = [i for i in items if i.get("daily") or i.get("weekly") is not None or i.get("group")
+                         or abs(float(i["at"]) - at) > 3 * 3600 or similar(i["text"], item["text"]) < 0.75]
             if weekly is not None:
                 item["weekly"] = int(weekly)
             if group:
@@ -303,6 +389,7 @@ class Events:
         self.presence_change = ""          # "left" / "returned" on the tick it happens
         self.briefing_busy = False
         self.ci_seen: dict | None = None   # repo -> was failing, at the last look
+        self.recent = Recent()             # repeat guard (see say_key)
 
     # -- speaking, with manners
     def should_hold(self) -> str:
@@ -315,10 +402,23 @@ class Events:
             return "you are away"
         return ""
 
-    def announce(self, text: str, urgent: bool = False, push: bool = False) -> str:
+    def announce(self, text: str, urgent: bool = False, push: bool = False,
+                 window: float | None = None) -> str:
         """Say it now, or hold it if this is a bad moment. Returns what happened.
         push: worth reaching him away from the desk too (a finished job, CI
-        breaking), even though it is not urgent enough to interrupt."""
+        breaking), even though it is not urgent enough to interrupt.
+        window: seconds in which the same line is not said again (default
+        repeat_guard_hours)."""
+        if window is None:
+            window = float(cfg().get("repeat_guard_hours", 3)) * 3600
+        if window > 0 and self.recent.seen(text, window):
+            if self.activity:
+                self.activity.push("system", "Not repeated", text[:120])
+            return "repeat"
+        with self.lock:
+            if any(similar(text, h) >= 0.86 for h in self.held):
+                self.held = [h for h in self.held if similar(text, h) < 0.86]
+        self.recent.mark(text)
         why = "" if urgent else self.should_hold()
         if why:
             with self.lock:
@@ -354,7 +454,7 @@ class Events:
             # Something said to an empty room is repeated -- unless he walked
             # back in within a couple of minutes and so very likely heard it.
             stale = time.time() - 120
-            items = [t for at, t in self.missed if at < stale] + self.held
+            items = dedupe([t for at, t in self.missed if at < stale] + self.held)
             self.held, self.missed = [], []
         today = time.strftime("%Y-%m-%d")
         if self.for_brief and time.time() - self.for_brief_at > 600:
@@ -545,16 +645,18 @@ class Events:
         import nova_memory
         state = self.nx.load_state()
         raised = state.setdefault("loops_raised", {})
-        item = self.nx.pick_loop(nova_memory.loops(), raised, c)
+        counts = state.setdefault("loops_count", {})
+        item = self.nx.pick_loop(nova_memory.loops(), raised, dict(c, _loop_counts=counts))
         if not item:
             return
         raised[str(item["id"])] = time.time()
+        counts[str(item["id"])] = int(counts.get(str(item["id"]), 0)) + 1
         for k in [k for k, t in raised.items() if time.time() - float(t) > 30 * 86400]:
             raised.pop(k, None)
         self.nx.save_state(state)
         if self.activity:
             self.activity.push("system", "Loose end", item["text"][:120])
-        self.announce(self.nx.loop_line(item))
+        self.announce(self.nx.loop_line(item), window=3 * 86400)
 
     def check_pages(self) -> None:
         """Web pages he asked to be told about (nova_web watches). The reading
@@ -880,12 +982,25 @@ class Events:
                             self._log("events: " + msg)
 
             def reminders_due() -> None:
-                for item in self.reminders.due():
+                batch, now = [], time.time()
+                for item in self.reminders.due(now):
+                    late = now - float(item["at"])
+                    repeating = item.get("daily") or item.get("weekly") is not None
+                    # Nova was off when it fell due. A day-old "the trip is today"
+                    # is wrong, not helpful; a daily one an hour late is just noise.
+                    if late > (3600 if repeating else 6 * 3600):
+                        if self._log:
+                            self._log(f"events: reminder {item.get('id')} skipped, {int(late // 60)} min late: {item['text'][:80]}")
+                        continue
+                    if any(similar(item["text"], b["text"]) >= 0.75 for b in batch):
+                        continue                          # two reminders for the same thing: say it once
+                    batch.append(item)
+                for item in batch:
                     try:
                         if item.get("kind") == "ask" and self._ask:
                             self._ask(item["text"])
                         else:
-                            self.announce("Sir, a reminder: " + item["text"], urgent=True)
+                            self.announce("Sir, a reminder: " + item["text"], urgent=True, window=600)
                     except Exception as exc:          # noqa: BLE001 -- the rest of the batch still goes out
                         if self._log:
                             self._log(f"events: reminder {item.get('id')} not delivered: {exc}")

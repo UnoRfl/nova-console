@@ -38,6 +38,7 @@ ROOT = Path.home() / ".nova"
 CONFIG_FILE = ROOT / "config.json"
 RULES_FILE = ROOT / "rules.json"
 STATE_FILE = ROOT / "extras-state.json"
+TESTING = bool(__import__("os").environ.get("NOVA_TEST"))
 NOTES_DIR = Path.home() / "Documents" / "Nova Notes"
 NO_WINDOW = 0x08000000
 
@@ -347,6 +348,7 @@ class Health:
 
     def __init__(self, ram=ram_percent, cpu=_cpu_times, disks=drives, top=top_process) -> None:
         self._ram, self._cpu, self._disks, self._top = ram, cpu, disks, top
+        self._persist = ram is ram_percent and not TESTING   # tests inject fakes and stay in memory
         self.prev_cpu: tuple[int, int] | None = None
         self.hot = {"ram": 0, "cpu": 0}
         self.said: dict[str, float] = {}
@@ -367,8 +369,18 @@ class Health:
         for key, value, limit, name in (("ram", ram, float(conf["ram_warn_percent"]), "Memory"),
                                         ("cpu", cpu, float(conf["cpu_warn_percent"]), "The processor")):
             self.hot[key] = self.hot[key] + 1 if value >= limit else 0
-            if self.hot[key] >= 2 and now - self.said.get(key, 0) > 3600:
+            # Sir, 2026-11-17: "memory is at 9x percent" every hour of the day is
+            # nagging -- 16 GB runs high here. Once per health_repeat_hours, and
+            # the stamp survives a restart (it used to be forgotten every time).
+            gap = float(conf.get("health_repeat_hours", 6)) * 3600
+            if not self.said.get(key) and self._persist:
+                self.said[key] = float(load_state().get("health_said", {}).get(key) or 0)
+            if self.hot[key] >= 2 and now - self.said.get(key, 0) > gap:
                 self.said[key] = now
+                if self._persist:
+                    st = load_state()
+                    st.setdefault("health_said", {})[key] = now
+                    save_state(st)
                 hog = self._top(key)
                 out.append(f"Sir, {name.lower() if key == 'cpu' else 'memory'} "
                            f"{'has been' if key == 'cpu' else 'is'} at {int(value)} percent"
@@ -652,6 +664,10 @@ def pick_loop(loops: list[dict], raised: dict, conf: dict, now: float | None = N
         if now - born < float(conf["follow_up_age_hours"]) * 3600:
             continue
         if now - float(raised.get(str(item["id"])) or 0) < 3 * 86400:
+            continue
+        # Sir, 2026-11-17 (repeats): the same loose end came back every three
+        # days, sometimes in two wordings. Twice per loose end, then never.
+        if int((conf.get("_loop_counts") or {}).get(str(item["id"]), 0)) >= 2:
             continue
         return item
     return None

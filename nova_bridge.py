@@ -856,6 +856,27 @@ def owner_login(login: str) -> bool:
 # Set by the hands tools through /api/taint, cleared when Sir speaks again;
 # nova_tools.approve refuses risky PC actions while it is set.
 TAINT = {"at": 0.0, "source": ""}
+
+# Sir, 2026-11-17: "when Nova is already thinking, there's no way to interrupt
+# her if I said something wrong or wanted to change". cancel_turn() bumps this;
+# a turn that started under an older number gives up instead of answering,
+# retrying, or falling through to another engine.
+CANCEL = {"gen": 0}
+
+# "Nova, stop" / "never mind" / "scratch that" while she is working. Only an
+# utterance made of nothing else counts; "wait, open Blender instead" is a
+# new request (which also replaces the one in flight).
+STOP_RE = re.compile(
+    r"^(?:(?:hey |okay |ok |yo )?nova[, ]*)?(?:no[, ]+)?(?:"
+    r"stop|stop it|stop that|stop thinking|cancel|cancel that|cancel it|abort|"
+    r"never ?mind|forget it|forget that|scratch that|wait|wait wait|hold on|hang on|"
+    r"that's wrong|that is wrong|wrong|not that|i said it wrong|"
+    r"stop stop|nova stop)(?:[, ]+(?:nova|sir|please|thanks))*[.!? ]*$")
+
+
+def is_stop(prompt: str) -> bool:
+    said = re.sub(r"[^a-z' ,.!?]+", " ", (prompt or "").lower().replace("’", "'"))
+    return bool(STOP_RE.match(" ".join(said.split())))
 TAINT_TTL = 15 * 60
 
 
@@ -1964,11 +1985,14 @@ class Backend:
         # Over today's allowance, a pinned model gives way too: the router
         # below then plans the free brains instead of spending more.
         spent = self.cfg.get("channel") in (None, "owner") and self.over_budget()
+        gen = CANCEL["gen"]
         if not self.routable(model) and not spent:
             owner = self.cfg.get("channel") in (None, "owner")
             # A pinned model still hears what he said from his phone meanwhile.
             note = self.context_for("fixed", self.seen_upto) if owner and not reset else ""
             out = self.ask_fixed(note + prompt, None if model == "auto" else model, reset, timeout, speak)
+            if CANCEL["gen"] != gen:
+                return {"error": "cancelled", "detail": "Stopped."}
             if owner and "error" not in out:
                 self.record(route_text or prompt, out.get("text", ""), "fixed")
                 self.seen_upto = self.turn_no
@@ -1991,6 +2015,8 @@ class Backend:
 
         out: dict = {}
         for engine, arg in plan:
+            if CANCEL["gen"] != gen:
+                return {"error": "cancelled", "detail": "Stopped."}
             key = engine if engine != "claude" else f"claude:{arg}"
             self.activity.push("system", "Route", f"{tier} ({how}) -> {key}")
             log(f"route: {tier} by {how} -> {key}")
@@ -1999,6 +2025,8 @@ class Backend:
                 w.key = key
                 note = self.context_for(key, w.seen_upto)
                 out = w.ask_claude(note + prompt, arg, False, timeout, speak)
+                if out.get("error") == "cancelled" or CANCEL["gen"] != gen:
+                    return {"error": "cancelled", "detail": "Stopped."}
                 if out.get("error") == "spawn_failed":
                     # One hiccup (a process that died, a pipe that broke) is not
                     # an outage: try a fresh process once before falling back.
@@ -2031,6 +2059,8 @@ class Backend:
                     self.status = "ready"
             elif engine == "codex":
                 out = self.ask_codex(self.context_for(key, 0, limit=4) + prompt, arg, timeout, speak)
+                if CANCEL["gen"] != gen:
+                    return {"error": "cancelled", "detail": "Stopped."}
             else:
                 # The local model gets the shared conversation as its history.
                 self.local_history = [m for x in self.recent[-6:] for m in
@@ -2038,6 +2068,8 @@ class Backend:
                                         if x["engine"] != "unprompted" else ())
                                        + ({"role": "assistant", "content": x["reply"][:600]},))]
                 out = self.ask_local(prompt, local, speak, routed=claude_ok)
+                if CANCEL["gen"] != gen:
+                    return {"error": "cancelled", "detail": "Stopped."}
                 if out.get("error") == "escalate":
                     tier, how = "normal", how + "+escalated"
                     plan.extend([p for p in self.router.plan("normal", claude_ok, self.codex_ready(), False)
@@ -2075,15 +2107,25 @@ class Backend:
                          "-s", "danger-full-access", "-C", self.cfg["workdir"],
                          "-c", f'model_reasoning_effort="{effort}"',
                          "-o", str(out_file), CODEX_BRIEF + "\n\nRequest: " + prompt]
+            gen = CANCEL["gen"]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                                      errors="replace", timeout=timeout or self.cfg.get("max_seconds", 180),
-                                      cwd=self.cfg["workdir"], stdin=subprocess.DEVNULL,
-                                      creationflags=NO_WINDOW, env=nova_harness.clean_env())
-            except subprocess.TimeoutExpired:
-                return {"error": "timeout", "detail": "Codex took too long to answer."}
+                # Popen, not run: cancel_turn() has to be able to kill it.
+                self.codex_proc = proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                    errors="replace", cwd=self.cfg["workdir"], stdin=subprocess.DEVNULL,
+                    creationflags=NO_WINDOW, env=nova_harness.clean_env())
+                try:
+                    proc.stdout, proc.stderr = proc.communicate(timeout=timeout or self.cfg.get("max_seconds", 180))
+                except subprocess.TimeoutExpired:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
+                                   timeout=5, creationflags=NO_WINDOW)
+                    return {"error": "timeout", "detail": "Codex took too long to answer."}
             except OSError as exc:
                 return {"error": "spawn_failed", "detail": f"could not start Codex: {exc}"}
+            finally:
+                self.codex_proc = None
+            if CANCEL["gen"] != gen:
+                return {"error": "cancelled", "detail": "Stopped."}
             try:
                 text = out_file.read_text(encoding="utf-8", errors="replace").strip()
             except OSError:
@@ -2121,6 +2163,8 @@ class Backend:
         if not want_local:
             self.key = "fixed"
             out = self.ask_claude(prompt, model, reset, timeout, speak)
+            if out.get("error") == "cancelled":
+                return out
             if out.get("error") == "spawn_failed":
                 log(f"claude hiccup, retrying once: {str(out.get('detail'))[:200]}")
                 self.kill()
@@ -2232,6 +2276,7 @@ class Backend:
             self.done.clear()
             self.result = None
             self.answer_parts = []
+            gen = CANCEL["gen"]
             self.turn_tools = 0                 # tools run this turn (a retry must not repeat them)
             self.turn_trace = []
             began = time.time()
@@ -2275,6 +2320,10 @@ class Backend:
                 if self.speech:
                     self.speech.close()
                 return {"error": "timeout", "detail": "Claude took too long to answer."}
+            if CANCEL["gen"] != gen:
+                if self.speech:
+                    self.speech.close()
+                return {"error": "cancelled", "detail": "Stopped."}
 
             payload = self.result or {}
             text = (payload.get("result") or "").strip()
@@ -2767,11 +2816,15 @@ class Handler(BaseHTTPRequestHandler):
         # arrives until the reply is sent, whichever engine or shortcut
         # handles it. _post sets self.in_turn once it knows it is Sir asking.
         self.in_turn = False
+        self.desk_turn = False
         try:
             self._post()
         finally:
             if self.in_turn:
                 self.server.turn(-1)
+            if self.desk_turn:
+                with self.server.desk_lock:
+                    self.server.desk_turns = max(0, self.server.desk_turns - 1)
 
     def _post(self) -> None:
         route = self.path.split("?", 1)[0]
@@ -3146,6 +3199,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "result": how})
             return
 
+        if route == "/api/cancel":
+            # The panel's stop button / a hotkey: drop whatever she is working on.
+            stopped = self.server.cancel_turn(str(body.get("by") or "panel"))
+            self.send_json({"ok": True, "stopped": stopped})
+            return
+
         if route == "/api/stop-speech":
             by = str(body.get("by") or "panel")
             # A voice can only stop speech that is audible. The panel's stop
@@ -3334,6 +3393,24 @@ class Handler(BaseHTTPRequestHandler):
                 # mid-turn used to lift the hold for the turn that read the page.
                 TAINT.update(at=0.0, source="")
             log(f"ask[{channel}]: {prompt[:110]}")
+            if profile == "owner" and channel in ("voice", "panel"):
+                busy = self.server.desk_turns > 0 or self.server.backend.busy()
+                if is_stop(prompt):
+                    stopped = self.server.cancel_turn(f"{channel}: {prompt[:40]}")
+                    if stopped or busy:
+                        text = "Stopped, Sir."
+                        spoken = self.server.speak_now(text) if body.get("speak") else False
+                        self.send_json({"text": text, "ms": 0, "turns": 0, "denials": 0, "remembered": [],
+                                        "cancelled": True, "spoken": spoken,
+                                        "memories": len(load_memories(limit=10_000))})
+                        return
+                elif self.server.desk_turns > 0 and not ack_reply(prompt):
+                    # He corrected himself / changed his mind while she was
+                    # still working: drop the old request, answer this one.
+                    self.server.cancel_turn("replaced by a new request", quiet=True)
+                with self.server.desk_lock:
+                    self.server.desk_turns += 1
+                self.desk_turn = True
             if profile == "owner":
                 self.in_turn = True                   # released in do_POST
                 self.server.turn(+1)
@@ -3619,7 +3696,9 @@ class Handler(BaseHTTPRequestHandler):
                 result["memories"] = len(load_memories(limit=10_000))
                 self.server.activity.push("remember", "Remembered", noted[0][:120])
 
-            if "error" in result:
+            if result.get("error") == "cancelled":
+                log("  -> cancelled")
+            elif "error" in result:
                 log(f"  -> {result['error']}: {result.get('detail', '')[:160]}")
             else:
                 log(f"  -> {result['ms']}ms, {result.get('turns', 0)} turns")
@@ -3842,6 +3921,64 @@ def main() -> int:
 
     httpd.mode = mode
     httpd.lights = nova_presence.Lights(mode)
+    httpd.desk_turns, httpd.desk_lock = 0, threading.Lock()
+
+    def cancel_turn(by: str, quiet: bool = False) -> bool:
+        """Stop what she is working on: kill the engine mid-turn, stop her
+        voice, and make the turn give up instead of retrying. True if anything
+        was actually running."""
+        workers = [backend, *list(backend.workers.values())]
+        busy = [w for w in workers if w.lock.locked()]
+        codex = [w for w in workers if getattr(w, "codex_proc", None)]
+        talking = bool(nova_voice and nova_voice.shared().active)
+        if not busy and not codex and not talking and httpd.desk_turns == 0:
+            return False
+        CANCEL["gen"] += 1
+        for w in busy:
+            if not getattr(w, "codex_proc", None):
+                w.kill()                              # Claude: the process tree; the turn returns at once
+                w.carry_due = True                    # the next process still knows the thread
+        for w in codex:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(w.codex_proc.pid)], capture_output=True,
+                               timeout=5, creationflags=NO_WINDOW)
+            except (OSError, subprocess.SubprocessError, AttributeError):
+                pass
+        if nova_voice:
+            try:
+                nova_voice.shared().stop(force=True)
+            except Exception:                         # noqa: BLE001
+                pass
+        log(f"turn cancelled ({by})")
+        activity.push("system", "Stopped" if not quiet else "Replaced", by[:120])
+        return True
+
+    httpd.cancel_turn = cancel_turn
+
+    # Sir, 2026-11-17: other sounds soften while she listens or talks
+    # (nova_duck). Thinking keeps them down only for the first stretch, so
+    # a long job does not leave his music quiet for minutes.
+    duck_t = {"since": 0.0}
+
+    def duck_want() -> bool:
+        m = mode()
+        if m in ("listening", "speaking", "approval"):
+            duck_t["since"] = 0.0
+            return True
+        if m == "thinking" and (httpd.turns > 0 or time.time() - httpd.heard_at < 4):
+            # a request of his in flight -- not the engine warming up or a quiet check
+            duck_t["since"] = duck_t["since"] or time.time()
+            return time.time() - duck_t["since"] < float((cfg.get("duck") or {}).get("thinking_s", 25))
+        duck_t["since"] = 0.0
+        return False
+
+    try:
+        if os.environ.get("NOVA_TEST"):
+            raise RuntimeError("off in tests: a test bridge must never touch his real mixer")
+        import nova_duck
+        httpd.ducker = nova_duck.Ducker(duck_want, conf=lambda: cfg.get("duck") or {}, log=log)
+    except Exception as exc:                          # noqa: BLE001 -- no ducking is not worth failing over
+        log(f"duck: unavailable: {type(exc).__name__}: {exc}")
     httpd.notices, httpd.notice_seq, httpd.notice_lock = [], 0, threading.Lock()
 
     def announce(text: str) -> None:
@@ -4004,7 +4141,9 @@ def main() -> int:
                     out = json.loads(r.read().decode("utf-8") or "{}")
             except Exception as exc:                # noqa: BLE001
                 out = {"error": "bridge", "detail": str(exc)}
-            if out.get("error"):
+            if out.get("error") == "cancelled":
+                pass                                # he stopped it, or a newer request replaced it
+            elif out.get("error"):
                 log(f"voice request failed: {out.get('error')}: {str(out.get('detail'))[:160]}")
                 speak_now("Sorry, Sir, something went wrong with that one.")
             elif out.get("text") and not out.get("spoken"):

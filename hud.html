@@ -4811,6 +4811,12 @@
 
       clearInterval(state.thinkTimer);
 
+      if (out.error === "cancelled") {
+        // He stopped it, or a newer request replaced it: no error, no speech.
+        bubble.textContent = "Stopped.";
+        sysLine("Request", "STOPPED", "warn");
+        return;
+      }
       if (out.error) {
         const msg = ERRORS[out.error] || out.detail || "The bridge reported an error.";
         bubble.textContent = msg;
@@ -5144,6 +5150,8 @@
   });
 
   function haltAll() {
+    // Tell the bridge too: aborting the fetch alone left her working on it.
+    api("/api/cancel", { method: "POST", body: JSON.stringify({ by: "panel stop" }) }).catch(() => {});
     if (state.abort) state.abort.abort();
     if (window.speechSynthesis) speechSynthesis.cancel();
     stopLocalSpeech();
