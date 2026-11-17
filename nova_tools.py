@@ -89,7 +89,7 @@ TIERS = {
     "whatsapp_chats": "free", "whatsapp_read": "free",
     "desktop_look": "free", "open_settings": "announce",
     "desktop_click": "confirm", "desktop_type": "confirm", "desktop_keys": "confirm",
-    "desktop_click_at": "confirm",
+    "desktop_click_at": "confirm", "desktop_scroll": "confirm",
 }
 
 MC_DIR = r"C:\Users\You\Downloads\mcserver"      # on the headless PC
@@ -1135,6 +1135,12 @@ def desktop_click_at(x: int, y: int, double: bool = False, right: bool = False) 
     return _desk("click_at", x, y, double, right)
 
 
+def desktop_scroll(x: int, y: int, direction: str = "down", clicks: int = 5) -> str:
+    """Scroll anywhere on screen: wheel over point (x, y) in real screen pixels. direction is
+    up, down, left or right; clicks is the number of wheel notches (about three lines each)."""
+    return _desk("scroll", x, y, direction, clicks)
+
+
 SETTINGS_PAGES = {"display": "display", "sound": "sound", "bluetooth": "bluetooth", "wifi": "network-wifi",
                   "network": "network", "apps": "appsfeatures", "default apps": "defaultapps",
                   "notifications": "notifications", "power": "powersleep", "storage": "storagesense",
@@ -1328,7 +1334,7 @@ ALL = [web_research, web_find, web_text, web_extract, watch_page, list_page_watc
        save_note, recent_files, notes_start, notes_stop,
        class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read, gmail_send, gmail_reply,
-       whatsapp_chats, whatsapp_read, spotify_play, tv, habits, look_through_camera, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at,
+       whatsapp_chats, whatsapp_read, spotify_play, tv, habits, look_through_camera, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at, desktop_scroll,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
        remind, list_reminders, cancel_reminder, schedule_meeting, list_meetings, cancel_meeting, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,

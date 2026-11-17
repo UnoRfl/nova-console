@@ -180,6 +180,28 @@ def click_at(x: int, y: int, double: bool = False, right: bool = False) -> str:
         return f"Clicked at {x},{y}" + (f" ({ctrl.Name[:40]})" if ctrl and ctrl.Name else "") + "."
 
 
+def scroll(x: int, y: int, direction: str = "down", clicks: int = 5) -> str:
+    """Scroll the wheel over screen point (x, y). direction: up, down, left or right."""
+    import ctypes
+    auto = _auto()
+    with auto.UIAutomationInitializerInThread():
+        ctrl = auto.ControlFromPoint(int(x), int(y))
+        if ctrl:
+            _guard(ctrl.GetTopLevelControl(), "Scrolling")
+    d = (direction or "down").strip().lower()
+    horizontal = d in ("left", "right")
+    if d not in ("up", "down", "left", "right"):
+        return f"Unknown direction '{direction}'; use up, down, left or right."
+    amount = int(clicks) * 120 * (1 if d in ("up", "right") else -1)
+    user32 = ctypes.windll.user32
+    user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.1)
+    flag = 0x01000 if horizontal else 0x0800        # MOUSEEVENTF_HWHEEL / MOUSEEVENTF_WHEEL
+    user32.mouse_event(flag, 0, 0, ctypes.c_ulong(amount & 0xFFFFFFFF).value, 0)
+    time.sleep(0.2)
+    return f"Scrolled {d} {int(clicks)} notches at {x},{y}."
+
+
 def set_text(target: str, text: str, window: str = "", enter: bool = False) -> str:
     auto = _auto()
     with auto.UIAutomationInitializerInThread():
