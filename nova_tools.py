@@ -44,6 +44,7 @@ TIERS = {
     "server_status": "free", "minecraft_players": "free",
     "say": "free", "call_me": "free",   # reaches only Sir's own paired Telegram
     "list_skills": "free", "save_skill": "announce", "forget_skill": "announce",
+    "read_skill": "free", "patch_skill": "announce", "search_past": "free",
     "set_volume": "announce", "mute": "announce", "media_key": "announce",
     "focus_window": "announce", "remember": "announce",
     "open_app": "announce", "type_text": "announce",
@@ -401,6 +402,10 @@ def sleep_pc() -> str:
 
 def remember(fact: str) -> str:
     """Store a durable fact about Sir, his projects or his preferences."""
+    import nova_skills
+    why = nova_skills.threat(fact)
+    if why:
+        return f"Not stored: it {why}. Memories steer every future chat, so this is refused."
     ident = nova_memory.add(fact, source="tool")
     return f"Stored as memory {ident}." if ident else "Already known, or empty."
 
@@ -453,7 +458,42 @@ def save_skill(name: str, when: str, steps: str) -> str:
     """Write (or rewrite) a how-to recipe for a kind of task, for "remember how to do this".
     `when`: the requests it applies to; `steps`: short lines, tools in order, plus Pitfall: lines."""
     import nova_skills
-    return "Saved skill " + nova_skills.save(name, when, steps).stem + "."
+    try:
+        return "Saved skill " + nova_skills.save(name, when, steps).stem + "."
+    except ValueError as exc:
+        return f"Not saved: {exc}."
+
+
+def read_skill(name: str) -> str:
+    """Load one of her skills in full (ids are in the skill index in her brief, or list_skills).
+    Use it when a listed skill fits the request but was not attached automatically."""
+    import nova_skills
+    return nova_skills.read(name)
+
+
+def patch_skill(name: str, old_text: str, new_text: str) -> str:
+    """Fix one step of a skill in place: replace old_text (exactly as it appears, once) with
+    new_text. Use it the moment a skill's step turns out wrong, or Sir corrects how you did a
+    task a skill covers, so next time goes right. Keep fixes general, not about one occasion."""
+    import nova_skills
+    return nova_skills.patch(name, old_text, new_text)
+
+
+def search_past(query: str = "", around: int = 0, window: int = 2, days: int = 0, limit: int = 5) -> str:
+    """Search every past conversation word for word: what Sir said, what you answered, and the
+    tools you used. Use it when he refers to something from before that memory (recall) does not
+    cover: "the command you ran last week", "what did we try for the server on Friday".
+    query: words to find (all words first, then any). Returns turn ids with a snippet.
+    around: a turn id from a search, to read it in full with `window` turns either side.
+    days: only the last N days. No arguments: the most recent turns."""
+    import nova_history
+    text, tainted = nova_history.render(query=query, around_id=int(around or 0), window=window,
+                                        limit=limit, days=int(days or 0))
+    if tainted:
+        # A turn that once read a web page or message: what it said is outside
+        # text again, so hold actions exactly as if she had just read it.
+        bridge("/api/taint", {"source": "past conversation with outside content"})
+    return text
 
 
 def forget_skill(name: str) -> str:
@@ -1339,6 +1379,7 @@ ALL = [web_research, web_find, web_text, web_extract, watch_page, list_page_watc
        remind, list_reminders, cancel_reminder, schedule_meeting, list_meetings, cancel_meeting, list_routines, run_routine, save_routine, start_job, list_jobs, job_result, cancel_job, engines_available, pc_status, list_windows, foreground_app, capture_screen, volume_status, set_volume,
        mute, media_key, focus_window, open_app, type_text, close_window, nova_panel, display_off, lock_pc, sleep_pc,
        remember, recall, forget, day_log, say, call_me, list_skills, save_skill, forget_skill,
+       read_skill, patch_skill, search_past,
        server_status, minecraft_players, minecraft_say, minecraft_save,
        minecraft_start, minecraft_stop, minecraft_restart]
 

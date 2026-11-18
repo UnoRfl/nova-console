@@ -30,7 +30,7 @@ gone = b.forget_from_prompt("Nova, forget that purple elephants")
 checks.append(("forget removes it", gone == ["the test fact is purple elephants"] and not m.search("purple elephants", kinds=("fact",))))
 checks.append(("project notes answer a project question", "cobblemon" in m.recall_block("restart the cobblemon server").lower()))
 checks.append(("unrelated question recalls nothing", m.recall_block("what is two plus two") == ""))
-checks.append(("persona builds", 3000 < len(b.build_persona()) < 44000))   # +care and habits, 2026-11-15
+checks.append(("persona builds", 3000 < len(b.build_persona()) < 47000))   # +care and habits 2026-11-15; +skill index, all facts 2026-11-18
 
 for name, ok in checks:
     print(("  ok   " if ok else "  FAIL ") + name)

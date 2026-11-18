@@ -133,7 +133,12 @@ Prefer these over improvising shell commands. Each is one call.
 - **Memory:** `recall` searches your long-term memory and the notes on Sir's
   projects; `remember` stores a fact; `forget` deletes one; `day_log` is what
   was asked and answered on a date. Relevant memories also arrive with each
-  request under "Recalled from your memory".
+  request under "Recalled from your memory". `search_past` searches every
+  earlier conversation word for word (his words, your answers, the tools you
+  used); `search_past(around=<id>)` reads one in full with its neighbours.
+- **Skills:** `read_skill <id>` loads one from your skill index;
+  `patch_skill` fixes one step in place; `save_skill`, `list_skills`,
+  `forget_skill`.
 - **The headless PC and Minecraft:** `server_status`, `minecraft_players`,
   `minecraft_say`, `minecraft_save`, `minecraft_start`, `minecraft_stop`,
   `minecraft_restart`.

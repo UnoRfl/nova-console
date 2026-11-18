@@ -125,7 +125,8 @@ CLSID_MMDeviceEnumerator = GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
 E_RENDER, DEVICE_STATE_ACTIVE, CLSCTX_ALL = 0, 1, 23
 
 
-def _proc_name(pid: int) -> str:
+def _proc_path(pid: int) -> str:
+    """Full image path of a process, lower-case ("" if it cannot be read)."""
     k = ctypes.windll.kernel32
     k.OpenProcess.restype = c_void_p
     h = k.OpenProcess(0x1000, False, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
@@ -135,7 +136,7 @@ def _proc_name(pid: int) -> str:
         buf = ctypes.create_unicode_buffer(520)
         size = DWORD(520)
         if k.QueryFullProcessImageNameW(c_void_p(h), 0, buf, ctypes.byref(size)):
-            return os.path.basename(buf.value).lower()
+            return buf.value.lower()
         return ""
     finally:
         k.CloseHandle(c_void_p(h))
@@ -165,11 +166,22 @@ def sessions() -> list[dict]:
                 pid = int(c2.GetProcessId())
                 inst = c2.GetSessionInstanceIdentifier()
                 vol = ctl.QueryInterface(ISimpleAudioVolume)
-                out.append({"key": f"{dev_id}|{inst}", "pid": pid, "name": _proc_name(pid), "vol": vol,
-                            "state": int(ctl.GetState())})
+                path = _proc_path(pid)
+                out.append({"key": f"{dev_id}|{inst}", "pid": pid, "name": os.path.basename(path),
+                            "path": path, "vol": vol, "state": int(ctl.GetState())})
             except Exception:                         # noqa: BLE001
                 continue
     return out
+
+
+NOVA_DIR = str(ROOT).lower() + os.sep
+
+
+def is_nova(s: dict, own: set[int]) -> bool:
+    """Her own voice: this process or its venv launcher (by pid -- the real
+    interpreter is the shared system pythonw.exe, which his Discord bot and the
+    PocketNova panel also run on), or anything whose exe lives in ~/.nova."""
+    return s["pid"] in own or s.get("path", "").startswith(NOVA_DIR)
 
 
 def _load() -> dict:
@@ -233,12 +245,28 @@ class Ducker:
                 return k
         return None
 
+    def _keep_nova_loud(self, s: dict) -> None:
+        """Sir, 2026-11-18: her voice must never come out softer -- that is the
+        whole point of ducking. Windows remembers per-app volume by exe, so one
+        stray lowering would stick to every Nova session after it."""
+        try:
+            if float(s["vol"].GetMasterVolume()) < 0.999:
+                s["vol"].SetMasterVolume(c_float(1.0), None)
+                self.log(f"duck: Nova's own volume was low ({s['name']}), put back to full")
+            if s["vol"].GetMute():
+                s["vol"].SetMute(False, None)
+        except Exception:                             # noqa: BLE001
+            pass
+
     def _down(self, c: dict) -> None:
         skip = {x.lower() for x in c["skip"]}
         level = max(0.0, min(1.0, float(c["level"])))
         steps = []
         for s in sessions():
-            if s["pid"] in self.own or s["pid"] == 0 or s["name"] in skip:
+            if is_nova(s, self.own):
+                self._keep_nova_loud(s)
+                continue
+            if s["pid"] == 0 or s["name"] in skip:
                 continue
             try:
                 cur = float(s["vol"].GetMasterVolume())
@@ -257,7 +285,8 @@ class Ducker:
         if steps:
             _save(self.saved)                         # before lowering: a crash can always be undone
             self._fade(steps, float(c["fade_ms"]))
-            self.log(f"duck: softened {len(steps)} app(s): " + ", ".join(sorted({v['name'] for v in self.saved.values()}))[:160])
+            names = sorted({v["name"] for v in self.saved.values()})
+            self.log(f"duck: softened {len(steps)} more app(s); down now: " + ", ".join(names)[:160])
 
     def _up(self, c: dict | None = None, fade: bool = True) -> int:
         """Put back everything we lowered that is still where we left it. An
@@ -265,6 +294,8 @@ class Ducker:
         are gone stay (a day at most) so the app's next session is put back."""
         steps = []
         for s in sessions():
+            if is_nova(s, self.own):
+                continue
             try:
                 cur = float(s["vol"].GetMasterVolume())
             except Exception:                         # noqa: BLE001
@@ -292,6 +323,9 @@ class Ducker:
         comtypes.CoInitialize()
         try:
             self.saved = {k: v for k, v in _load().items() if isinstance(v, dict) and "set" in v}
+            for s in sessions():
+                if is_nova(s, self.own):
+                    self._keep_nova_loud(s)
             n = self._up(fade=False) if self.saved else 0
             if n:
                 self.log(f"duck: restored {n} app(s) left softened by a crash")
@@ -334,7 +368,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "list"
     if cmd == "list":
         for s in sessions():
-            print(f"{s['pid']:>6}  {s['name']:<32} vol={s['vol'].GetMasterVolume():.2f} state={s['state']}")
+            tag = "  <- Nova" if is_nova(s, set()) else ""
+            print(f"{s['pid']:>6}  {s['name']:<32} vol={s['vol'].GetMasterVolume():.2f} state={s['state']}{tag}")
     elif cmd == "demo":
         flag = {"on": True}
         d = Ducker(lambda: flag["on"], log=print)

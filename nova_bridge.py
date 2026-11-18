@@ -47,6 +47,7 @@ import nova_schedule  # noqa: E402
 import nova_extras  # noqa: E402
 import nova_telegram  # noqa: E402
 import nova_skills  # noqa: E402
+import nova_history  # noqa: E402
 import nova_phoneline  # noqa: E402
 
 try:                        # "play X on Spotify" with no model (nova_spotify.py)
@@ -89,6 +90,7 @@ if os.environ.get("NOVA_TEST"):
     nova_extras.STATE_FILE = STATE / "extras-state.json"
     nova_extras.RULES_FILE = STATE / "rules.json"
     nova_skills.SKILLS_DIR = STATE / "skills"
+    nova_history.DB_FILE = STATE / "history.db"
     nova_extras.NOTES_DIR = STATE / "notes"
     import nova_web
     nova_web.CACHE_DB = STATE / "web-cache.db"
@@ -258,7 +260,7 @@ PRIVATE_TOOLS = {"messenger_chats", "messenger_read", "gmail_inbox", "gmail_read
                  "read_screen", "clipboard_read", "clipboard_write", "save_note", "recent_files",
                  "notes_start", "notes_stop", "briefing", "project_status", "list_rules", "save_rule",
                  "delete_rule", "web_research", "web_find", "web_text", "web_extract", "watch_page",
-                 "list_page_watches", "stop_page_watch", "habits", "look_through_camera"}
+                 "list_page_watches", "stop_page_watch", "habits", "look_through_camera", "search_past"}
 
 
 def nova_tool_names(*tiers: str) -> list[str]:
@@ -481,8 +483,16 @@ channel is Sir himself writing from his phone: answer short, it is read on a
 small screen and may be played as a voice note.
 You teach yourself: after a long task goes well, a recipe of the steps is
 saved automatically, and when one fits a request it is attached as "Skills you
-wrote yourself". "Remember how to do this" is save_skill; list_skills and
-forget_skill manage them.
+wrote yourself". Your skill index (below, under "Skills you have") lists every
+one; if one fits but was not attached, read_skill it before starting. When a
+skill's step turns out wrong, or he corrects how you did a task a skill
+covers, fix that step at once with patch_skill (general rule, not the story).
+"Remember how to do this" is save_skill; list_skills and forget_skill manage
+them.
+Every past conversation is kept word for word. When he refers to something
+from before that recall does not cover ("the command you ran last week", "what
+did we try on Friday"), search_past finds it; search_past(around=<id>) reads
+that exchange in full. Never guess at what was said before when you can look.
 If you see something he would want to know while doing something else (a
 failing server, a full disk, a job that ended badly), say so in one sentence
 at the end of your reply. If you think he is about to make a mistake, say so
@@ -917,13 +927,37 @@ def build_persona() -> str:
     if noticed:
         parts.append("# What you have noticed about him\n\n" + noticed)
 
-    remembered = load_memories(limit=25)
+    try:
+        index = nova_skills.index_block()
+    except Exception as exc:                          # noqa: BLE001
+        index = ""
+        log(f"skill index failed: {type(exc).__name__}: {exc}")
+    if index:
+        parts.append("# Skills you have (id: when it applies; read_skill <id> loads one)\n\n" + index)
+
+    # Every fact fits, up to a budget (Hermes-style cap). It used to be the
+    # newest 25, so older facts silently fell out of her brief. Past 80% she
+    # is told to tidy up: merge or forget stale facts rather than pile up.
+    remembered = load_memories(limit=10_000)
     if remembered:
-        lines = "\n".join(f"- {m}" for m in remembered)
+        kept, used = [], 0
+        for m in reversed(remembered):
+            if used + len(m) > MEMORY_BUDGET:
+                break
+            kept.append(m)
+            used += len(m) + 3
+        lines = "\n".join(f"- {m}" for m in reversed(kept))
+        full = round(100 * sum(len(m) + 3 for m in remembered) / MEMORY_BUDGET)
+        note = ""
+        if full >= 80:
+            note = (f"\n\n(Memory is {full}% full"
+                    f"{', the oldest no longer fit here' if len(kept) < len(remembered) else ''}. "
+                    "When he next asks you to remember something, first merge facts that overlap and "
+                    "forget stale ones, so nothing important drops out.)")
         parts.append(
             "# Things you were asked to remember\n\n"
             "These came from earlier conversations. Treat them as true unless "
-            "he corrects you.\n\n" + lines
+            "he corrects you.\n\n" + lines + note
         )
 
     return "\n\n".join(parts)
@@ -932,6 +966,7 @@ def build_persona() -> str:
 # ------------------------------------------------------------------- memory
 
 MEMORY_FILE = ROOT / "memory.jsonl"
+MEMORY_BUDGET = 5000          # characters of remembered facts carried in every brief
 REMEMBER_PATTERN = re.compile(r"\[\[\s*remember\s*:\s*(.+?)\s*\]\]",
                               re.IGNORECASE | re.DOTALL)
 
@@ -1017,7 +1052,9 @@ _PANEL_OPEN = re.compile(
     r"\b(?:show|bring|pull|open|put)\s+(?:" + _PANEL_THING + r"|" + _PANEL_IT + r")\s+(?:up\s+)?(?:back|again)\b"
     r"|\b(?:re)?open\s+(?:the |my )?(?:tab|panel|projection|hud)\b")
 _PANEL_OFFTOPIC = re.compile(r"\b(?:file|folder|downloads?|desktop|tab in|chrome|browser|discord|spotify|"
-                             r"steam|minecraft|server|roblox|game|app|program)\b")
+                             r"steam|minecraft|server|roblox|game|app|program|opera|edge|firefox|brave)\b")
+# "...logs me out when I close it": Sir describing what HE does, not an order.
+_PANEL_HIS_OWN = re.compile(r"\b(?:when|whenever|if|after|before|once|every time)\s+i\s+(?:\w+\s+)?$")
 
 
 def panel_command(prompt: str, panel_open: bool) -> tuple[str, str] | None:
@@ -1032,6 +1069,8 @@ def panel_command(prompt: str, panel_open: bool) -> tuple[str, str] | None:
     if _PANEL_OPEN.search(said):
         return "open", ""
     m = _PANEL_CLOSE.search(said)
+    if m and _PANEL_HIS_OWN.search(said[:m.start()]):
+        return None
     if m:
         bare = re.search(r"\b(?:it|that|this|that one|this one|seen it|seen enough|done)\b\s*$", m.group(0))
         # "remove it" only means the panel when the panel is what is up.
@@ -3674,6 +3713,14 @@ class Handler(BaseHTTPRequestHandler):
                                                  speak=bool(body.get("speak")), route_text=route_text)
             if "error" not in result:
                 nova_memory.log_exchange(prompt, result.get("text", ""))
+                if profile in ("owner", "remote"):
+                    try:
+                        nova_history.record(prompt, result.get("text", ""), channel=channel,
+                                            engine=str(result.get("engine") or result.get("brain") or ""),
+                                            tools=result.get("trace") or [],
+                                            tainted=TAINT["at"] >= turn_began, mask=mask_secrets)
+                    except Exception as exc:  # noqa: BLE001 - history must never cost a reply
+                        log(f"history record failed: {type(exc).__name__}: {exc}")
                 # Real work just went well: maybe it is worth a recipe. Never
                 # from a turn that read untrusted content (a page could
                 # otherwise plant a standing instruction).
