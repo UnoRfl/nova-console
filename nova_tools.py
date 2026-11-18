@@ -833,6 +833,7 @@ def class_schedule(day: str = "") -> str:
             if off and cs:
                 return f"{ns.DAY_NAMES[idx]}: NO SCHOOL ({off}). Normally: " + "; ".join(ns.describe(c) for c in cs)
         return f"{ns.DAY_NAMES[idx]}: " + ("; ".join(ns.describe(c) for c in cs) if cs else "no classes.")
+    return ns.week_text()
 
 
 def school_days(days_ahead: int = 30, check_now: bool = False) -> str:
@@ -872,7 +873,6 @@ def _events_scan() -> bool:
         return not r.get("error")
     except Exception:                                 # noqa: BLE001
         return False
-    return ns.week_text()
 
 
 def _get_json(url: str, timeout: float = 8) -> dict:
