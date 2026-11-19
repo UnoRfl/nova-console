@@ -685,10 +685,13 @@
   body.brain-on .transcript .spoken { font-size: 13.5px; }
   body.brain-on .transcript:not(:has(.heard:not(:empty), .spoken:not(:empty))) { display: none; }
   body.brain-on .activity, body.brain-on .command, body.brain-on .notice { width: 100%; }
+  /* the galaxy is the default view: the page is born in its layout (no old-UI flash, no slide-in) */
+  html:has(body.brain-boot), body.brain-boot { background: #000; }
+  body.brain-boot .stage { animation: none; }
   @keyframes brain-col { from { opacity: 0; transform: translateX(-36px) scale(.985); } to { opacity: 1; transform: none; } }
 </style>
 </head>
-<body data-mode="idle">
+<body data-mode="idle" class="brain-on brain-boot">
 
 <!-- Line icons on a 24 grid, drawn with the current colour. Referenced by <use>. -->
 <svg class="glyphs" width="0" height="0" aria-hidden="true" focusable="false">
@@ -5929,12 +5932,14 @@
     setTimeout(() => { if (!open) { post({ nova: "visible", on: false }); post({ nova: "inset", right: 0 }); } }, 720);
   }
   window.__novaBrain = { show, hide, get open() { return open; } };
+  // born in the brain layout (class on <body>); if the galaxy never reports ready, fall back to the plain panel
+  const bootFallback = setTimeout(() => { if (!ready) body.classList.remove("brain-on", "brain-boot"); }, 8000);
 
   window.addEventListener("message", e => {
     if (e.source !== fr.contentWindow || e.origin !== location.origin) return;
     const m = e.data || {};
     if (!m.brain) return;
-    if (m.type === "ready") { ready = true; layout(); show(); }
+    if (m.type === "ready") { ready = true; clearTimeout(bootFallback); layout(); show(); requestAnimationFrame(() => body.classList.remove("brain-boot")); }
     else if (m.type === "busy") { busy = !!m.on; if (busy && !open && body.dataset.mode !== "idle") show(); }
   });
 
