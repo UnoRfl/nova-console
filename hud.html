@@ -677,6 +677,13 @@
   body.brain-on .stage { width: 380px; max-width: 380px; margin: 0 8px 0 auto; animation: brain-col .62s cubic-bezier(.2,.8,.2,1); }
   body.brain-on .reactor-wrap { width: clamp(150px, 26vh, 230px); }
   body.brain-on .transcript { display: none; }
+  /* brain is the default view: once she's done, her answer stays readable in the column */
+  body.brain-on[data-mode="idle"] .transcript, body.brain-on[data-mode="listening"] .transcript {
+    display: flex; max-height: 34vh; padding: 12px 14px; border-radius: 14px;
+    background: color-mix(in srgb, #000 55%, transparent); backdrop-filter: blur(8px); }
+  body.brain-on .transcript .heard { font-size: 16px; }
+  body.brain-on .transcript .spoken { font-size: 13.5px; }
+  body.brain-on .transcript:not(:has(.heard:not(:empty), .spoken:not(:empty))) { display: none; }
   body.brain-on .activity, body.brain-on .command, body.brain-on .notice { width: 100%; }
   @keyframes brain-col { from { opacity: 0; transform: translateX(-36px) scale(.985); } to { opacity: 1; transform: none; } }
 </style>
@@ -5880,7 +5887,7 @@
 (function () {
   "use strict";
   const TOKEN = "__NOVA_TOKEN__";
-  const COL = 396, CLOSE_AFTER_MS = 10000;
+  const COL = 396; // the brain is the default view: always on (no idle auto-close)
   const body = document.body, stage = document.querySelector(".stage"), top = document.querySelector("header.top");
   const heard = document.getElementById("heard"), core = document.getElementById("core");
   const fr = document.createElement("iframe");
@@ -5918,24 +5925,15 @@
     if (e.source !== fr.contentWindow || e.origin !== location.origin) return;
     const m = e.data || {};
     if (!m.brain) return;
-    if (m.type === "ready") { ready = true; layout(); if (["thinking", "tool", "speaking", "remember"].includes(body.dataset.mode)) show(); }
+    if (m.type === "ready") { ready = true; layout(); show(); }
     else if (m.type === "busy") { busy = !!m.on; if (busy && !open && body.dataset.mode !== "idle") show(); }
   });
 
   // her state comes from the panel's own mode (set from /api/orb)
   new MutationObserver(() => {
     const mode = body.dataset.mode || "idle";
-    if (mode === "thinking" || mode === "tool" || mode === "remember") show();
-    if (mode === "idle") { if (!idleSince) idleSince = Date.now(); scheduleClose(); } else idleSince = 0;
+    if (!open) show();
   }).observe(body, { attributes: true, attributeFilter: ["data-mode"] });
-  function scheduleClose() {
-    clearTimeout(closeTimer);
-    closeTimer = setTimeout(function check() {
-      if (!open) return;
-      if (busy || body.dataset.mode !== "idle" || fr.matches(":hover")) { closeTimer = setTimeout(check, 1500); return; }
-      hide();
-    }, CLOSE_AFTER_MS);
-  }
   // what he said (voice or typed)
   if (heard) new MutationObserver(() => {
     const t = (heard.textContent || "").trim();
@@ -5943,19 +5941,21 @@
     lastHeard = t; post({ nova: "heard", text: t });
   }).observe(heard, { childList: true, characterData: true, subtree: true });
   // the projector owns the stage: step aside
-  if (stage) new MutationObserver(() => { if (stage.classList.contains("projecting")) hide(); }).observe(stage, { attributes: true, attributeFilter: ["class"] });
-  // Esc closes the brain first; keys pressed inside the brain still reach the panel
-  window.addEventListener("keydown", e => { if (e.key === "Escape" && open) { hide(); } }, true);
+  if (stage) new MutationObserver(() => {
+    if (stage.classList.contains("projecting")) hide();
+    else if (!stage.classList.contains("closing")) setTimeout(show, 400);
+  }).observe(stage, { attributes: true, attributeFilter: ["class"] });
+  // keys pressed inside the brain still reach the panel (the brain stays: it's the default view)
   fr.addEventListener("load", () => {
     try {
       fr.contentWindow.addEventListener("keydown", e => {
-        if (e.key === "Escape") { hide(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); }
+        if (e.key === "Escape") { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); }
         else if (e.key === " " && !e.repeat) window.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space" }));
       });
     } catch (err) { /* cross-origin would mean the token page failed; ignore */ }
   });
   window.addEventListener("resize", () => { if (open) layout(); });
-  document.addEventListener("visibilitychange", () => { if (document.hidden && open) hide(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) { if (open) hide(); } else setTimeout(show, 200); });
 })();
 </script>
 </body>
