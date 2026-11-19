@@ -35,9 +35,25 @@ function seedFromCamera() {
 function unwrap(a, r) { while (a - r > Math.PI) a -= Math.PI * 2; while (a - r < -Math.PI) a += Math.PI * 2; return a; }
 function limitTurn(a, r, max) { const d = unwrap(a, r) - r; return r + Math.max(-max, Math.min(max, d)); }
 
-function aim(target, dist, el, az, prioName = 'ESTABLISH') {
+/** Smallest camera distance >= d (along the el/az ray from target t) that keeps the camera
+ *  outside the hole's coverage sphere (radius minD). Continuous in every input, so the camera
+ *  never pops. Sir, 2026-11-20: "when it zooms in it glitches back and forth" -- the old guard
+ *  multiplied d by 1.15 in steps, so a zoom toward a star near the hole went in a sawtooth. */
+function clearOfHole(tx, ty, tz, el, az, d, minD) {
+  const ce = Math.cos(el), ux = ce * Math.sin(az), uy = Math.sin(el), uz = ce * Math.cos(az);
+  const b = tx * ux + ty * uy + tz * uz, c = tx * tx + ty * ty + tz * tz - minD * minD;
+  const disc = b * b - c;
+  if (disc <= 0) return d;                       // the ray never enters the sphere
+  const q = Math.sqrt(disc), near = -b - q, far = -b + q;
+  return d > near && d < far ? far : d;          // inside the sphere -> step out to its far wall
+}
+
+function aim(target, dist, el, az) {
+  az = unwrap(az, rig.az.x);
+  // land the zoom where the hole guard will not have to push it (8 % margin for drift)
+  dist = Math.max(dist, clearOfHole(target[0], target[1], target[2], el, az, dist, minHoleDistance() * 1.08));
   rig.tx.target = target[0]; rig.ty.target = target[1]; rig.tz.target = target[2];
-  rig.dist.target = dist; rig.el.target = el; rig.az.target = unwrap(az, rig.az.x);
+  rig.dist.target = dist; rig.el.target = el; rig.az.target = az;
 }
 
 /* ------------------------------------------------------------------ shots */
@@ -318,15 +334,12 @@ function frame(dt, t, now) {
   rig.el.x = Math.max(-25 * D2R, Math.min(60 * D2R, rig.el.x));
 
   const tx = rig.tx.x, ty = rig.ty.x, tz = rig.tz.x;
-  let d = rig.dist.x;
   const ce = Math.cos(rig.el.x), se = Math.sin(rig.el.x), sa = Math.sin(rig.az.x), ca = Math.cos(rig.az.x);
-  // coverage: keep the camera far enough from the hole (hole disc <= 30 % of the screen, >= 640 u)
-  const minD = minHoleDistance();
-  for (let k = 0; k < 4; k++) {
-    const px = tx + d * ce * sa, py = ty + d * se, pz = tz + d * ce * ca;
-    if (Math.hypot(px, py, pz) >= minD) break;
-    d *= 1.15;
-  }
+  // coverage: keep the camera far enough from the hole (hole disc <= 30 % of the screen, >= 640 u).
+  // Continuous clamp, fed back into the spring so it rests on the wall instead of sliding
+  // through it and popping back out.
+  const d = clearOfHole(tx, ty, tz, rig.el.x, rig.az.x, rig.dist.x, minHoleDistance());
+  if (d > rig.dist.x) { rig.dist.x = d; if (rig.dist.v < 0) rig.dist.v = 0; }
   camera.position.set(tx + d * ce * sa, ty + d * se, tz + d * ce * ca);
   controls.target.set(tx, ty, tz);
 
