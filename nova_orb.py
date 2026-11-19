@@ -593,6 +593,7 @@ class Orb:
         self.last_active = 0.0                     # when she was last doing something
         self.blank = False                         # a fully faded frame has been pushed
         self.frames = 0
+        self.over_panel = False
         self.was_active = False
         self.raised_at = 0.0
         self._swp = ctypes.windll.user32.SetWindowPos
@@ -738,10 +739,11 @@ class Orb:
             self.apply_prefs(self.read_prefs())
         elif self.frames % 10 == 0:
             self.sync_prefs()
+            self.over_panel = self.panel_behind()
         active = mode not in ("idle", "offline")
         if active:
             self.last_active = now
-        wanted = (not self.hidden) or now - self.last_active < LINGER
+        wanted = ((not self.hidden) or now - self.last_active < LINGER) and not self.over_panel
         # Stay above every other window. "-topmost" is set once at start, and
         # any other always-on-top window (the taskbar, a game, an overlay)
         # that comes forward afterwards lands on top of her. So: re-assert it
@@ -767,6 +769,42 @@ class Orb:
         # whole 33 ms on top of the time the frame took to draw.
         spent = (time.time() - now) * 1000.0
         self.root.after(max(1, int(33 - spent)) if self.vis > 0.0 else 120, self.tick)
+
+    def panel_behind(self) -> bool:
+        """True when the window right under the orb is the full panel (Sir, 2026-11-20:
+        the orb is a second copy of the panel's own core, so it steps aside there).
+        Walks the z-order from the top, skipping the orb and anything hidden,
+        minimised or not under the orb's centre; the first real window decides."""
+        try:
+            u = ctypes.windll.user32
+            r = wintypes.RECT()
+            u.GetWindowRect(self.hwnd, ctypes.byref(r))
+            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+            h = u.GetTopWindow(None)
+            buf = ctypes.create_unicode_buffer(64)
+            for _ in range(400):
+                if not h:
+                    return False
+                ex = u.GetWindowLongW(h, -20)         # GWL_EXSTYLE: skip click-through / tool overlays
+                if h != self.hwnd and u.IsWindowVisible(h) and not u.IsIconic(h) and not (ex & 0xA0):
+                    w = wintypes.RECT()
+                    u.GetWindowRect(h, ctypes.byref(w))
+                    if w.left <= cx < w.right and w.top <= cy < w.bottom and (w.right - w.left) > 200:
+                        cloaked = ctypes.c_int(0)
+                        try:
+                            ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 14, ctypes.byref(cloaked), 4)
+                        except Exception:             # noqa: BLE001
+                            pass
+                        if not cloaked.value:
+                            u.GetWindowTextW(h, buf, 64)
+                            if buf.value != "NOVA":
+                                return False
+                            u.GetClassNameW(h, buf, 64)
+                            return buf.value.startswith("Chrome_WidgetWin")
+                h = u.GetWindow(h, 2)                 # GW_HWNDNEXT
+        except Exception:                             # noqa: BLE001 -- never let this kill the orb
+            return False
+        return False
 
     def raise_top(self) -> None:
         """Back to the top of the always-on-top band, without taking focus."""

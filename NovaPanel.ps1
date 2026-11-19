@@ -144,6 +144,12 @@ if (-not ('NovaWin32' -as [type])) {
 '@
 }
 
+if (-not ('NovaWinZoom' -as [type])) {
+    Add-Type -Name 'NovaWinZoom' -Namespace '' -MemberDefinition @'
+        [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+'@
+}
+
 function Find-NovaWindow {
     <#
         Track the panel by window title, not by the PID we launched.
@@ -199,7 +205,8 @@ function Show-NovaPanel {
     $open = Find-NovaWindow
     if ($open) {
         $h = $open.MainWindowHandle
-        if ([NovaWin32]::IsIconic($h)) { [void][NovaWin32]::ShowWindow($h, 9) }  # SW_RESTORE
+        # The panel is a maximized window by default (Sir, 2026-11-20: "windowed fullscreen").
+        if ([NovaWin32]::IsIconic($h) -or -not [NovaWinZoom]::IsZoomed($h)) { [void][NovaWin32]::ShowWindow($h, 3) }  # SW_MAXIMIZE
         [void][NovaWin32]::SetForegroundWindow($h)
         if ($Screen) { Move-NovaPanel -Window $open -Screen $Screen -Maximize:$Maximize }
         Set-Content -Path $pidFile -Value $open.Id -Encoding utf8
@@ -244,6 +251,7 @@ function Show-NovaPanel {
         "--app=$url",
         "--user-data-dir=`"$profileDir`"",
         "--window-size=$Width,$Height",
+        '--start-maximized',
         '--new-window',
         '--no-first-run',
         '--no-default-browser-check',
@@ -267,6 +275,7 @@ function Show-NovaPanel {
         $win = Find-NovaWindow
         if ($win) {
             if ($Screen) { Move-NovaPanel -Window $win -Screen $Screen -Maximize:$Maximize }
+            elseif (-not [NovaWinZoom]::IsZoomed($win.MainWindowHandle)) { [void][NovaWin32]::ShowWindow($win.MainWindowHandle, 3) }
             Set-Content -Path $pidFile -Value $win.Id -Encoding utf8
             if (-not $Quiet) { Write-NovaLog "panel opened (pid $($win.Id)) via $(Split-Path $browser -Leaf)" }
             return $true

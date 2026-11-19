@@ -5897,8 +5897,16 @@
   let ready = false, open = false, busy = false, idleSince = 0, closeTimer = 0, lastHeard = "";
   const post = m => { if (ready && fr.contentWindow) fr.contentWindow.postMessage(Object.assign({ nova: m.nova }, m), location.origin); };
   const now = () => performance.timeOrigin + performance.now();
+  // the real width the column takes from the right edge (page padding included), so the
+  // brain's own buttons keep a gap from the Ask bar instead of butting into it
+  function colInset() {
+    if (!stage || !body.classList.contains("brain-on")) return COL;
+    let x = 0, e = stage; while (e) { x += e.offsetLeft; e = e.offsetParent; }   // offsetLeft ignores the slide-in transform
+    const w = innerWidth - x + 8;
+    return w > 200 && w < innerWidth - 200 ? Math.round(w) : COL;
+  }
   function layout() {
-    post({ nova: "inset", right: open ? COL : 0 });
+    post({ nova: "inset", right: open ? colInset() : 0 });
     const tb = top ? top.getBoundingClientRect().bottom : 58;
     post({ nova: "top", px: Math.round(tb + 6) });
   }
@@ -5910,6 +5918,7 @@
     post({ nova: "visible", on: true }); layout();
     post({ nova: "glide", t0Epoch: now(), windupMs: 0, slideMs: 620, from, inset: COL, glass: null });
     body.classList.add("brain-on");
+    requestAnimationFrame(layout);
     if (lastHeard) post({ nova: "heard", text: lastHeard });
   }
   function hide() {

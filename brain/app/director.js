@@ -48,13 +48,19 @@ function centroid(pts) { const c = [0, 0, 0]; for (const p of pts) { c[0] += p[0
 function radius(pts, c) { let r = 0; for (const p of pts) r = Math.max(r, Math.hypot(p[0]-c[0], p[1]-c[1], p[2]-c[2])); return r; }
 function fitDist(r) { const fov = camera.fov * D2R, free = Math.min(1, (innerWidth - state.insetRight) / Math.max(1, innerHeight) / camera.aspect); return r * 1.25 / Math.sin(Math.min(fov, fov * free * camera.aspect) / 2); }
 
-/** Ask for a shot. Higher priority wins; the current shot holds at least 1.2 s; bursts merge. */
+/** Ask for a shot. Higher priority wins; bursts merge.
+ *  Every move gets COMMIT_MS to land before the next one starts (Sir, 2026-11-20: the camera
+ *  "flicks back and forth before locking on" -- a recall shot cut off mid-swing by the first
+ *  tool, then that tool's shot cut off by the group). Only a clearly bigger moment (birth,
+ *  genesis) or his own click cuts in at once; everything else waits as `pending` (latest wins). */
+const COMMIT_MS = 1600;
 function request(name, plan, holdMs = 1200) {
   if (REDUCED && name !== 'ESTABLISH') return;
   const now = performance.now();
   const p = PRIO[name] ?? 1;
   if (now < shot.until && p < shot.prio) { return; }
-  if (now - shot.since < 1200 && name !== shot.name && p <= shot.prio) { pending = { name, plan, holdMs }; return; }
+  const cutIn = name === 'FOCUS' || p >= shot.prio + 2;
+  if (now - shot.since < COMMIT_MS && !cutIn) { if (!pending || p >= (PRIO[pending.name] ?? 1)) pending = { name, plan, holdMs }; return; }
   apply(name, plan, holdMs);
 }
 function apply(name, plan, holdMs) {
@@ -171,19 +177,27 @@ export async function init() {
     if (e.stars && e.stars.length) { const hits = e.stars.slice(0, 8);
       request('SEARCH', () => { shotStar = hits[0]; farFromHole(hits) ? frameOutward(hits) : frameStars(hits, { minD: minHoleDistance() }); }, 1600); }
   });
-  // tools: one leg = two-shot; several within 2.5 s = group
-  let burst = [], burstAt = 0;
+  // tools: one leg = two-shot; several within 2.5 s = group. Parallel calls land within a few
+  // ms of each other, so a burst is gathered for a beat and framed in ONE move (the beams
+  // themselves still leave at once -- fx-gaze launches them on the step, not on the shot).
+  let burst = [], burstAt = 0, burstTimer = 0, lone = null;
+  const flushBurst = () => {
+    const b = [...new Set(burst)].slice(-6);
+    if (!b.length) return;
+    if (b.length === 1 && lone) { const e = lone; request('TWO_SHOT', () => { shotStar = e.primary; const t = (e.targets && e.targets.length ? e.targets : [e.primary]).slice(0, 6);
+      farFromHole(t) ? frameOutward(t, { minDist: 460 }) : frameStars(t, { minD: minHoleDistance() }); }, 1400); }
+    else request('GROUP', () => { shotStar = b[b.length - 1]; farFromHole(b) && radius(b.map(starPos), centroid(b.map(starPos))) < 700 ? frameOutward(b) : frameStars(b, { minD: minHoleDistance() }); }, 1400);
+  };
   bus.on('step', e => {
     if (e.primary == null || e.primary < 0) return;
     if (e.tool === 'day_log') rewind(1);
     turnStops.push(e.primary);
     const now = performance.now();
-    if (now - burstAt > 2500) burst = [];
+    if (now - burstAt > 2500) { burst = []; lone = null; }
     burst.push(e.primary); burstAt = now;
+    if (burst.length === 1) lone = e;
     shotStar = e.primary;
-    if (burst.length === 1) request('TWO_SHOT', () => { shotStar = e.primary; const t = (e.targets && e.targets.length ? e.targets : [e.primary]).slice(0, 6);
-      farFromHole(t) ? frameOutward(t, { minDist: 460 }) : frameStars(t, { minD: minHoleDistance() }); }, 1400);
-    else { const b = burst.slice(-6); request('GROUP', () => farFromHole(b) && radius(b.map(starPos), centroid(b.map(starPos))) < 700 ? frameOutward(b) : frameStars(b, { minD: minHoleDistance() }), 1400); }
+    clearTimeout(burstTimer); burstTimer = setTimeout(flushBurst, 240);
   });
   bus.on('step:hold', () => request('HOLD', () => {}, 4000));
   bus.on('absorb', e => { absorbAt = performance.now(); absorbAmt = .5 * ((e && e.amount) || 1); });
@@ -254,7 +268,7 @@ function revealSoon() {
 /* ------------------------------------------------------------------ frame */
 function frame(dt, t, now) {
   // pending merged shot
-  if (pending && now - shot.since >= 1200) apply(pending.name, pending.plan, pending.holdMs);
+  if (pending && now - shot.since >= COMMIT_MS) apply(pending.name, pending.plan, pending.holdMs);
 
   // moods that breathe with time / voice (additive, never fights the eased base)
   readDrive(dt);
