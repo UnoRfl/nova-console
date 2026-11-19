@@ -38,6 +38,12 @@ LEGACY = ROOT / "memory.jsonl"
 PROJECT_NOTES = Path.home() / ".claude" / "projects" / "C--Users-You-Downloads" / "memory"
 
 _lock = threading.Lock()
+# What the last recall_block did, for the brain view (see recall_block).
+LAST_RECALL: list[int] = []     # ids of the rows it actually handed over
+LAST_NEAR: list[int] = []       # ids that nearly made it: cut by the budget, or turned away by search()
+LAST_DAYS: list[str] = []       # the diary days (YYYY-MM-DD) of the log lines it handed over
+LAST_TERMS: list[str] = []      # the words it searched for (at most 8)
+NEAR_MAX, TERMS_MAX = 12, 8
 
 STOP = set("""a an the and or but if then so to of in on at by for with from as is are was were be been
 i you he she it we they me my your his her its our their this that these those what which who how why
@@ -130,7 +136,13 @@ def _terms(query: str) -> list[str]:
     return [w for w in words if w not in STOP][:12]
 
 
-def search(query: str, limit: int = 6, kinds: tuple = ("fact", "project")) -> list[dict]:
+def search(query: str, limit: int = 6, kinds: tuple = ("fact", "project"),
+           near: list | None = None) -> list[dict]:
+    """The best full-text matches that share most of the question's words.
+
+    `near`, when given, collects the ids of rows the full-text search found
+    but the coverage test turned away, best first -- the near misses the brain
+    view rings. It never changes what is returned."""
     terms = _terms(query)
     if not terms:
         return []
@@ -155,7 +167,50 @@ def search(query: str, limit: int = 6, kinds: tuple = ("fact", "project")) -> li
         hay = (r["text"] + " " + r["topic"]).lower()
         if sum(1 for t in distinct if t[:5] in hay) >= need:
             out.append(dict(r))
+        elif near is not None:
+            near.append(r["id"])
     return out[:limit]
+
+
+def top_terms(query: str, n: int = TERMS_MAX) -> list[str]:
+    """The words a search for `query` looks for, each once, at most n."""
+    return list(dict.fromkeys(_terms(query)))[:n]
+
+
+def _near_ids(candidates: list, exclude: list, n: int = NEAR_MAX) -> list[int]:
+    """`candidates` in order, each once, minus `exclude`, at most n."""
+    out, skip = [], set(exclude)
+    for i in candidates:
+        if i is not None and i not in skip:
+            out.append(i)
+            skip.add(i)
+            if len(out) >= n:
+                break
+    return out
+
+
+def brain_rows(since: int = 0) -> dict:
+    """Every row after `since`, trimmed, for the brain view (plus totals so it
+    can tell when something was forgotten and reload)."""
+    with _lock, connect() as db:
+        rows = db.execute("SELECT id, kind, topic, source, at, substr(text, 1, 700) AS text "
+                          "FROM memory WHERE id > ? ORDER BY id", (int(since),)).fetchall()
+        total, top = db.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM memory").fetchone()
+    return {"rows": [dict(r) for r in rows], "count": total, "max": top}
+
+
+def match(query: str, limit: int = 8) -> dict:
+    """For the brain view's recall(query): the rows her recall tool would get
+    (ids), the rows the coverage test turned away (near, best first, at most
+    12) and the words searched for (terms, at most 8)."""
+    near: list[int] = []
+    ids = [h["id"] for h in search(query, limit=limit, kinds=("fact", "project", "loop"), near=near)]
+    return {"ids": ids, "near": _near_ids(near, ids), "terms": top_terms(query)}
+
+
+def match_ids(query: str, limit: int = 8) -> list[int]:
+    """The rows a recall for `query` would bring back -- what her recall tool sees."""
+    return match(query, limit)["ids"]
 
 
 def core(limit: int = 25) -> list[str]:
@@ -166,11 +221,16 @@ def core(limit: int = 25) -> list[str]:
     return [r["text"] for r in reversed(rows)]
 
 
-def day(date: str) -> list[str]:
+def _day_rows(date: str) -> list[tuple[str, str]]:
+    """day(), each line paired with the diary day it belongs to."""
     with _lock, connect() as db:
         rows = db.execute("SELECT text, at FROM memory WHERE kind='day' AND topic=? ORDER BY id",
                           (date,)).fetchall()
-    return [f"{r['at'][11:16]}  {r['text']}" for r in rows]
+    return [(f"{r['at'][11:16]}  {r['text']}", date) for r in rows]
+
+
+def day(date: str) -> list[str]:
+    return [line for line, _ in _day_rows(date)]
 
 
 def loops() -> list[dict]:
@@ -193,12 +253,17 @@ def close_loop(query: str) -> list[str]:
     return [hits[0]["text"]]
 
 
-def trail(query: str, days: int = 21, limit: int = 8) -> list[str]:
-    """The most recent diary lines about a subject, for "where did we leave off"."""
+def _trail_rows(query: str, days: int = 21, limit: int = 8) -> list[tuple[str, str]]:
+    """trail(), each line paired with the diary day it belongs to."""
     since = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * 86400))
     hits = [h for h in search(query, limit=40, kinds=("day",)) if h["topic"] >= since]
     hits.sort(key=lambda h: h["id"])
-    return [f"{h['at'][:16]}  {h['text']}" for h in hits[-limit:]]
+    return [(f"{h['at'][:16]}  {h['text']}", h["topic"] or h["at"][:10]) for h in hits[-limit:]]
+
+
+def trail(query: str, days: int = 21, limit: int = 8) -> list[str]:
+    """The most recent diary lines about a subject, for "where did we leave off"."""
+    return [line for line, _ in _trail_rows(query, days, limit)]
 
 
 def count(kind: str | None = None) -> int:
@@ -208,15 +273,27 @@ def count(kind: str | None = None) -> int:
         return db.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
 
 
-def recall_block(prompt: str, limit: int = 5, budget: int = 1400) -> str:
-    """What to whisper to her alongside a question: the memories that bear on it."""
-    hits = search(prompt, limit=limit, kinds=("fact", "project", "loop"))
+def recall_block(prompt: str, limit: int = 5, budget: int = 1400, info: dict | None = None) -> str:
+    """What to whisper to her alongside a question: the memories that bear on it.
+
+    It also notes, for the brain view, what she was really handed: LAST_RECALL
+    (the rows in the block -- a hit cut by the budget never reached her),
+    LAST_NEAR (rows that nearly made it: cut by the budget, then rows search()
+    found but turned away; at most 12), LAST_DAYS (the diary days of the log
+    lines) and LAST_TERMS (the words searched for, at most 8). `info`, when
+    given, receives the same as ids / near / days / terms: the caller's own
+    copy, which a recall running at the same time cannot overwrite."""
+    turned_away: list[int] = []
+    hits = search(prompt, limit=limit, kinds=("fact", "project", "loop"), near=turned_away)
     low = prompt.lower()
     extra: list[str] = []
+    dates: list[str] = []                   # the diary day of each line in extra
     if re.search(r"\byesterday\b", low):
-        extra = day(time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400)))[-12:]
+        rows = _day_rows(time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400)))[-12:]
+        extra, dates = [t for t, _ in rows], [d for _, d in rows]
     elif re.search(r"\b(today|earlier|this morning|just now)\b", low):
-        extra = day(time.strftime("%Y-%m-%d"))[-12:]
+        rows = _day_rows(time.strftime("%Y-%m-%d"))[-12:]
+        extra, dates = [t for t, _ in rows], [d for _, d in rows]
     if re.search(r"\b(leave off|left off|leaving off|pick(?:ing)? (?:it |this |that )?(?:back )?up|where were we|"
                  r"last time|what was i (?:doing|working on)|still (?:open|pending|unfinished|to do)|"
                  r"open loops?|unfinished|catch me up)\b", low):
@@ -224,23 +301,37 @@ def recall_block(prompt: str, limit: int = 5, budget: int = 1400) -> str:
         # subject, and whatever is still marked open.
         subject = re.sub(r"\b(leave|left|leaving|off|pick(?:ing)?|back|up|where|were|we|last|time|what|was|"
                          r"doing|working|still|open|pending|unfinished|loops?|catch|did|with|on)\b", " ", low)
-        extra += [t for t in trail(subject) if t not in extra]
+        more = [(t, d) for t, d in _trail_rows(subject) if t not in extra]
+        extra += [t for t, _ in more]
+        dates += [d for _, d in more]
         open_now = [l for l in loops() if l["id"] not in {h["id"] for h in hits}]
         hits += [dict(l, kind="loop") for l in open_now[-6:]]
-    if not hits and not extra:
-        return ""
     lines, used = [], 0
-    for h in hits:
+    given: list[int] = []                   # the rows that really made it into the block
+    cut: list[int] = []                     # hits the budget left out
+    for i, h in enumerate(hits):
         t = h["text"] if len(h["text"]) <= 420 else h["text"][:420] + "..."
         tag = f"[{h['topic']}] " if h["kind"] == "project" and h["topic"] else ""
         if h["kind"] == "loop":
             tag = f"(still open, from {h.get('at', '')[:10]}) "
         if used + len(t) > budget:
+            cut = [x.get("id") for x in hits[i:]]
             break
         lines.append(f"- {tag}{t}")
         used += len(t)
+        if h.get("id") is not None:
+            given.append(h["id"])
     for e in extra:
         lines.append(f"- (log) {e}")
+    # The brain view lights up exactly these rows while she answers.
+    global LAST_RECALL, LAST_NEAR, LAST_DAYS, LAST_TERMS
+    seen = {"ids": given, "near": _near_ids(cut + turned_away, given),
+            "days": sorted(set(dates)), "terms": top_terms(prompt)}
+    LAST_RECALL, LAST_NEAR, LAST_DAYS, LAST_TERMS = seen["ids"], seen["near"], seen["days"], seen["terms"]
+    if info is not None:
+        info.update({k: list(v) for k, v in seen.items()})
+    if not hits and not extra:
+        return ""
     return ("[Recalled from your memory -- use only if relevant, never read it out as a list]\n"
             + "\n".join(lines))
 

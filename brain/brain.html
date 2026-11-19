@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nova · Brain</title>
+<link rel="icon" href="data:,">
+<style>
+  /* Base layer. ui.js owns everything inside #ui / #toasts / #card / #tip and
+     this stylesheet; core.js owns #gl and #overlay positioning. Motion is
+     transforms + opacity only (CLS 0); the DOM is pooled by ui.js at boot. */
+  :root{
+    --ink:#f2f2f3; --ink2:rgba(242,242,243,.64); --ink3:rgba(242,242,243,.38);
+    --glass:rgba(16,16,19,.66); --glass2:rgba(26,26,30,.82); --edge:rgba(255,255,255,.08); --edge2:rgba(255,255,255,.15);
+    --gold:#ffd9a3; --amber:#ffb859; --ember:#f2856a;
+    --font:'Inter','Segoe UI Variable Text','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif;
+    --mono:'Cascadia Mono','Consolas',ui-monospace,monospace;
+    --ease:cubic-bezier(.2,.8,.2,1); --out:cubic-bezier(.33,1,.68,1); --wipe:cubic-bezier(.22,1,.36,1);
+    --top:18px;    /* embed: the HUD posts its header height ('top') */
+    --inset:0px;   /* the panel column width (state.insetRight), written by ui.js */
+    --say:clamp(20px,1.8vw,28px);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#000;color:var(--ink);overflow:hidden;font:13px/1.45 var(--font);-webkit-font-smoothing:antialiased;font-feature-settings:'cv11','ss03'}
+  #gl{position:fixed;inset:0;width:100%;height:100%;display:block;outline:none}
+  #overlay{position:fixed;inset:0;pointer-events:none;z-index:2;overflow:hidden}
+  #ui,#toasts,#card,#tip{position:fixed;z-index:5}
+  #ui{left:0;top:0;width:0;height:0}
+  #boot{position:fixed;inset:0;display:grid;place-items:center;z-index:9;color:var(--ink3);font-size:12px;letter-spacing:.08em;background:#000;transition:opacity 1.6s ease}
+  #boot.gone{opacity:0;pointer-events:none}
+
+  /* ---------------------------------------------------------- cluster labels (made by data.js) */
+  .cl{text-align:center;white-space:nowrap;pointer-events:none}
+  .cl b{display:block;font:500 9.5px/1.2 var(--font);letter-spacing:.2em;text-transform:uppercase;padding-left:.2em;color:rgba(242,242,243,.56);text-shadow:0 1px 8px #000,0 0 2px #000;transition:opacity .6s var(--out)}
+  .cl b i{display:inline-block;font-style:normal}
+  .cl span{display:none}                         /* no numbers in 3D */
+  body.turn .cl b{opacity:.4}
+  .cl.occl b{opacity:0 !important}
+  .cl.fresh b{opacity:1 !important}
+
+  /* ---------------------------------------------------------- 3D labels (pool of 3) */
+  .lb{white-space:nowrap;pointer-events:none}
+  .lb span{display:block;font:500 11px/1 var(--font);color:rgba(242,242,243,.88);text-shadow:0 1px 8px #000,0 0 2px #000;opacity:0;transform:translateY(4px);transition:opacity .26s var(--out),transform .26s var(--out)}
+  .lb.on span{opacity:1;transform:none}
+
+  /* ---------------------------------------------------------- U-1 words */
+  #words{position:fixed;left:28px;top:calc(var(--top) + 8px);width:min(560px,calc(100vw - var(--inset) - 56px));pointer-events:none;text-shadow:0 1px 14px #000;z-index:6}
+  #q{height:19px;font:400 12.5px/19px var(--font);color:rgba(242,242,243,.62);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:0;transform:translateY(4px);transition:opacity .24s var(--out),transform .24s var(--out),color .6s ease}
+  #q.on{opacity:1;transform:none}
+  #q.dim{color:rgba(242,242,243,.35)}
+  #say{position:relative;margin-top:7px;height:calc(var(--say) * 1.28 * 2);font:300 var(--say)/1.28 var(--font);letter-spacing:-.006em}
+  #say .ln{position:absolute;left:0;top:0;right:0;opacity:0;will-change:transform,opacity}
+  #say .ln span{color:rgba(242,242,243,.38);transition:color .14s linear}
+  #say .ln span.on{color:var(--ink)}
+  #terms{position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;z-index:6}
+  #terms i{position:fixed;left:0;top:0;font:500 12.5px/1 var(--font);font-style:normal;color:rgba(255,217,163,.92);white-space:nowrap;opacity:0;text-shadow:0 0 10px rgba(0,0,0,.9);will-change:transform,opacity}
+
+  /* ---------------------------------------------------------- U-2 trail */
+  #trail{position:fixed;left:28px;bottom:calc(22px + env(safe-area-inset-bottom,0px));height:72px;width:min(460px,calc(100vw - var(--inset) - 56px));pointer-events:none;z-index:6;font:400 12px/18px var(--font);text-shadow:0 1px 10px #000}
+  #trail .row{position:absolute;left:0;top:0;height:18px;opacity:0;transition:opacity .2s linear,transform .28s var(--wipe);pointer-events:none;will-change:transform,opacity}
+  #trail .row.live{pointer-events:auto;cursor:default}
+  #trail .in{display:flex;align-items:center;gap:6px;height:18px;white-space:nowrap;padding-right:4px}
+  #trail .g,#trail .s{flex:none;width:10px;height:10px;overflow:visible}
+  #trail .g *{display:none;fill:none;stroke:rgba(242,242,243,.86);stroke-width:1.1}
+  #trail .g .star{fill:rgba(242,242,243,.9);stroke:none}
+  #trail .row[data-g="star"] .g .star,#trail .row[data-g="square"] .g .square,#trail .row[data-g="ring"] .g .ring,
+  #trail .row[data-g="triangle"] .g .triangle,#trail .row[data-g="hexagon"] .g .hexagon{display:inline}
+  #trail .row[data-g="square"] .g .dot{display:inline;fill:rgba(242,242,243,.9);stroke:none}
+  #trail .v{font-weight:500;color:rgba(242,242,243,.92)}
+  #trail .sep{color:rgba(242,242,243,.34);margin:0 -2px}
+  #trail .o{color:rgba(242,242,243,.62)}
+  #trail .s *{display:none;fill:none;stroke:rgba(242,242,243,.75);stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+  #trail .s .sp{transform-box:fill-box;transform-origin:center;animation:nb-spin .9s linear infinite}
+  body:not(.turn) #trail .s .sp{animation-play-state:paused}
+  #trail .row[data-s="run"] .s .sp,#trail .row[data-s="hold"] .s .sp{display:inline}
+  #trail .row[data-s="hold"] .s .sp{stroke:var(--amber);animation-duration:1.8s}
+  #trail .row[data-s="done"] .s .tk{display:inline;stroke-dasharray:1;stroke-dashoffset:0;transition:stroke-dashoffset .16s ease-out}
+  #trail .row[data-s="err"] .s .ds{display:inline}
+  #trail .row[data-s="err"] .in{opacity:.45}
+  #trail .row.hot .v{color:#fff}
+  #trail .row.hot .o{color:rgba(242,242,243,.9)}
+  #trail .row.cited .o{color:rgba(255,226,186,.95)}
+  @keyframes nb-spin{to{transform:rotate(360deg)}}
+
+  /* ---------------------------------------------------------- U-3 pop-up cards + letterbox */
+  #toasts{left:0;top:0;width:0;height:0;z-index:7;pointer-events:none}
+  .pc{position:fixed;left:calc((100vw - var(--inset)) / 2 - 150px);top:calc(var(--top) + 118px);width:300px;height:58px;border-radius:12px;
+    background:rgba(16,16,19,.78);border:1px solid rgba(255,255,255,.08);padding:11px 16px 0 42px;opacity:0;visibility:hidden;will-change:transform,opacity;
+    -webkit-mask:radial-gradient(circle 6px at 0 50%,#0000 97%,#000) left/51% 100% no-repeat,radial-gradient(circle 6px at 100% 50%,#0000 97%,#000) right/51% 100% no-repeat;
+            mask:radial-gradient(circle 6px at 0 50%,#0000 97%,#000) left/51% 100% no-repeat,radial-gradient(circle 6px at 100% 50%,#0000 97%,#000) right/51% 100% no-repeat}
+  .pc svg{position:absolute;left:16px;top:22px;width:14px;height:14px;overflow:visible}
+  .pc svg path{fill:rgba(255,236,208,.95);transform-box:fill-box;transform-origin:center;transform:scale(.25)}
+  .pc svg circle{fill:#fff}
+  .pc.lit svg path{transform:none;transition:transform .6s cubic-bezier(.16,1,.3,1)}
+  .pc b{display:block;font:600 11px/14px var(--font);letter-spacing:.08em;text-transform:uppercase;color:rgba(242,242,243,.38);white-space:nowrap}
+  .pc b em{font-style:normal;font-weight:500;letter-spacing:.02em;text-transform:none;margin-left:8px;color:rgba(242,242,243,.32)}
+  .pc span{display:block;margin-top:5px;font:400 13px/18px var(--font);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #lbox i{position:fixed;left:0;right:0;height:9vh;background:#000;transform:scaleY(0);pointer-events:none;z-index:1;will-change:transform}
+  #lbox .t{top:0;transform-origin:50% 0}
+  #lbox .b{bottom:0;transform-origin:50% 100%}
+
+  /* ---------------------------------------------------------- U-4 detail card + tooltip (pinned by core.overlay) */
+  #card{width:286px;padding:11px 14px 12px;border-radius:12px;background:rgba(16,16,19,.84);border:1px solid rgba(255,255,255,.08);font:400 12.5px/1.5 var(--font);color:rgba(242,242,243,.74);pointer-events:none;text-shadow:none}
+  #card .k{font:600 10.5px/14px var(--font);letter-spacing:.08em;text-transform:uppercase;color:rgba(242,242,243,.38);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #card .x{margin-top:4px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+  #card .x b{font-weight:600;color:var(--ink)}
+  #card:not(.on){opacity:0!important;visibility:hidden!important}
+  #card .in{opacity:0;transform:translateY(4px);transition:opacity .2s var(--out),transform .2s var(--out)}
+  #card.on .in{opacity:1;transform:none}
+  #tip{pointer-events:none;font:500 11px/1 var(--font);color:rgba(242,242,243,.9);white-space:nowrap;text-shadow:0 1px 8px #000,0 0 2px #000}
+  #tip span{display:block;opacity:0;transition:opacity .14s linear}
+  #tip.on span{opacity:1}
+
+  /* ---------------------------------------------------------- U-5 dock */
+  #dock{position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom,0px));display:flex;gap:8px;z-index:6;transform:translateX(calc(-1 * var(--inset)));transition:transform .62s var(--ease)}
+  #dock button{position:relative;width:30px;height:30px;border-radius:32%;border:1px solid rgba(255,255,255,.08);background:rgba(16,16,19,.58);color:rgba(242,242,243,.62);display:grid;place-items:center;padding:0;margin:0;cursor:pointer;outline:none;transition:background .2s,color .2s,border-color .2s}
+  #dock button:hover,#dock button:focus-visible{background:rgba(30,30,35,.82);color:var(--ink);border-color:rgba(255,255,255,.15)}
+  #dock button svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+  #dock button::after{content:attr(aria-label);position:absolute;right:0;bottom:38px;font:500 11px/1 var(--font);color:rgba(242,242,243,.72);white-space:nowrap;opacity:0;transition:opacity .15s linear;pointer-events:none;text-shadow:0 1px 8px #000}
+  #dock button:hover::after,#dock button:focus-visible::after{opacity:1}
+  #bFollow .dot{fill:currentColor;stroke:none;transition:opacity .2s}
+  #bFollow[aria-pressed="false"] .dot{opacity:0}
+  #bAB .half{fill:currentColor;stroke:none}
+  #bAB[aria-pressed="false"] .half{opacity:.25}
+
+  /* ---------------------------------------------------------- reduced motion: fades only */
+  body.reduced #q,body.reduced .lb span,body.reduced #card .in{transform:none!important}
+  body.reduced #trail .row{transition:opacity .2s linear}
+  body.reduced #trail .s .sp{animation:none}
+  body.reduced .pc svg path{transform:none}
+</style>
+<script>window.NOVA_TOKEN = "__NOVA_TOKEN__";</script>
+<script type="importmap">
+{"imports":{
+  "three":"/brain/lib/three.module.js",
+  "three/addons/":"/brain/lib/addons/"
+}}
+</script>
+</head>
+<body>
+<canvas id="gl" tabindex="-1"></canvas>
+<div id="overlay"></div>
+<div id="ui">
+  <div id="words" aria-live="polite">
+    <div id="q"></div>
+    <div id="say"><div class="ln"></div><div class="ln"></div></div>
+  </div>
+  <div id="terms" aria-hidden="true"></div>
+  <div id="trail" role="log" aria-label="What Nova is doing"></div>
+  <div id="dock" role="toolbar" aria-label="View">
+    <button id="bReplay" type="button" aria-label="Replay turn" hidden><svg viewBox="0 0 14 14"><path d="M2.6 7a4.4 4.4 0 1 0 1.3-3.1"/><path d="M3.4 1.7v2.6H6"/></svg></button>
+    <button id="bAB" type="button" aria-label="Compare look" aria-pressed="true"><svg viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/><path class="half" d="M7 2a5 5 0 0 1 0 10z"/></svg></button>
+    <button id="bFollow" type="button" aria-label="Follow Nova" aria-pressed="true"><svg viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/><circle class="dot" cx="7" cy="7" r="2.1"/></svg></button>
+  </div>
+  <div id="lbox" aria-hidden="true"><i class="t"></i><i class="b"></i></div>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<div id="card"></div>
+<div id="tip"></div>
+<div id="boot"></div>
+<script type="module" src="/brain/app/main.js"></script>
+</body>
+</html>

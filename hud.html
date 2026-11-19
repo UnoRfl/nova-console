@@ -664,6 +664,21 @@
     .reactor-wrap { width: clamp(160px, 34vh, 300px); }
   }
   @media (max-height: 620px) { .reactor-wrap { width: clamp(120px, 34vh, 240px); } }
+
+  /* ---------------------------------------------------------------- brain view (Nova's memory, live)
+     A same-origin iframe behind the panel. While she works the column moves to the
+     right and the brain fills the rest of the window. Never shown while projecting. */
+  #brainView { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; z-index: 0; opacity: 0;
+    pointer-events: none; transition: opacity .28s cubic-bezier(.33,1,.68,1); background: #000; }
+  body.brain-on #brainView { opacity: 1; pointer-events: auto; }
+  body.brain-on .field { opacity: 0; transition: opacity .4s ease; }
+  body.brain-on .shell, body.brain-on .stage { pointer-events: none; }
+  body.brain-on .shell > *, body.brain-on .stage > * { pointer-events: auto; }
+  body.brain-on .stage { width: 380px; max-width: 380px; margin: 0 8px 0 auto; animation: brain-col .62s cubic-bezier(.2,.8,.2,1); }
+  body.brain-on .reactor-wrap { width: clamp(150px, 26vh, 230px); }
+  body.brain-on .transcript { display: none; }
+  body.brain-on .activity, body.brain-on .command, body.brain-on .notice { width: 100%; }
+  @keyframes brain-col { from { opacity: 0; transform: translateX(-36px) scale(.985); } to { opacity: 1; transform: none; } }
 </style>
 </head>
 <body data-mode="idle">
@@ -5855,6 +5870,92 @@
       } catch (e) { /* already reported */ }
     }, 4000);
   })();
+})();
+</script>
+
+<script>
+/* Brain view: Nova's memory as a live 3D galaxy, shown while she works.
+   The iframe polls the bridge itself (?selfpoll); this block only shows/hides it,
+   tells it the layout, and passes along what Sir said. */
+(function () {
+  "use strict";
+  const TOKEN = "__NOVA_TOKEN__";
+  const COL = 396, CLOSE_AFTER_MS = 10000;
+  const body = document.body, stage = document.querySelector(".stage"), top = document.querySelector("header.top");
+  const heard = document.getElementById("heard"), core = document.getElementById("core");
+  const fr = document.createElement("iframe");
+  fr.id = "brainView"; fr.title = "Nova's memory"; fr.setAttribute("aria-hidden", "true"); fr.tabIndex = -1;
+  fr.src = "/brain?token=" + encodeURIComponent(TOKEN) + "&embed=1&selfpoll=1";
+  body.insertBefore(fr, body.firstChild);
+  let ready = false, open = false, busy = false, idleSince = 0, closeTimer = 0, lastHeard = "";
+  const post = m => { if (ready && fr.contentWindow) fr.contentWindow.postMessage(Object.assign({ nova: m.nova }, m), location.origin); };
+  const now = () => performance.timeOrigin + performance.now();
+  function layout() {
+    post({ nova: "inset", right: open ? COL : 0 });
+    const tb = top ? top.getBoundingClientRect().bottom : 58;
+    post({ nova: "top", px: Math.round(tb + 6) });
+  }
+  function orbPoint() { const r = core ? core.getBoundingClientRect() : null; return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2, R: r.width / 2 } : null; }
+  function show() {
+    if (open || !ready || (stage && stage.classList.contains("projecting")) || document.hidden) return;
+    const from = orbPoint();
+    open = true; idleSince = 0; clearTimeout(closeTimer);
+    post({ nova: "visible", on: true }); layout();
+    post({ nova: "glide", t0Epoch: now(), windupMs: 0, slideMs: 620, from, inset: COL, glass: null });
+    body.classList.add("brain-on");
+    if (lastHeard) post({ nova: "heard", text: lastHeard });
+  }
+  function hide() {
+    if (!open) return;
+    open = false; clearTimeout(closeTimer);
+    post({ nova: "collapse", t0Epoch: now(), ms: 700 });
+    body.classList.remove("brain-on");
+    setTimeout(() => { if (!open) { post({ nova: "visible", on: false }); post({ nova: "inset", right: 0 }); } }, 720);
+  }
+  window.__novaBrain = { show, hide, get open() { return open; } };
+
+  window.addEventListener("message", e => {
+    if (e.source !== fr.contentWindow || e.origin !== location.origin) return;
+    const m = e.data || {};
+    if (!m.brain) return;
+    if (m.type === "ready") { ready = true; layout(); if (["thinking", "tool", "speaking", "remember"].includes(body.dataset.mode)) show(); }
+    else if (m.type === "busy") { busy = !!m.on; if (busy && !open && body.dataset.mode !== "idle") show(); }
+  });
+
+  // her state comes from the panel's own mode (set from /api/orb)
+  new MutationObserver(() => {
+    const mode = body.dataset.mode || "idle";
+    if (mode === "thinking" || mode === "tool" || mode === "remember") show();
+    if (mode === "idle") { if (!idleSince) idleSince = Date.now(); scheduleClose(); } else idleSince = 0;
+  }).observe(body, { attributes: true, attributeFilter: ["data-mode"] });
+  function scheduleClose() {
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(function check() {
+      if (!open) return;
+      if (busy || body.dataset.mode !== "idle" || fr.matches(":hover")) { closeTimer = setTimeout(check, 1500); return; }
+      hide();
+    }, CLOSE_AFTER_MS);
+  }
+  // what he said (voice or typed)
+  if (heard) new MutationObserver(() => {
+    const t = (heard.textContent || "").trim();
+    if (!t || t === lastHeard || /…$|^listening|^transcribing/i.test(t)) return;
+    lastHeard = t; post({ nova: "heard", text: t });
+  }).observe(heard, { childList: true, characterData: true, subtree: true });
+  // the projector owns the stage: step aside
+  if (stage) new MutationObserver(() => { if (stage.classList.contains("projecting")) hide(); }).observe(stage, { attributes: true, attributeFilter: ["class"] });
+  // Esc closes the brain first; keys pressed inside the brain still reach the panel
+  window.addEventListener("keydown", e => { if (e.key === "Escape" && open) { hide(); } }, true);
+  fr.addEventListener("load", () => {
+    try {
+      fr.contentWindow.addEventListener("keydown", e => {
+        if (e.key === "Escape") { hide(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); }
+        else if (e.key === " " && !e.repeat) window.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space" }));
+      });
+    } catch (err) { /* cross-origin would mean the token page failed; ignore */ }
+  });
+  window.addEventListener("resize", () => { if (open) layout(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && open) hide(); });
 })();
 </script>
 </body>

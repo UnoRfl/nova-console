@@ -24,11 +24,13 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
+import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1568,18 +1570,24 @@ class Activity:
     """A small ring of 'what Nova is doing right now' events for the panel.
 
     Every event carries a sequence number; the panel asks for everything after
-    the last one it saw, so nothing is missed and nothing is replayed.
+    the last one it saw, so nothing is missed and nothing is replayed. A
+    caller may also wait (a long-poll, at most MAX_WAIT seconds) for the next
+    event instead of asking again and again: push() wakes every waiter.
     """
 
     LIMIT = 400
+    MAX_WAIT = 8.0          # seconds a long-poll may be held open
+    SLICE = 0.5             # waiters re-check in slices this long
 
     def __init__(self) -> None:
         self.events: list[dict] = []
         self.seq = 0
         self.lock = threading.Lock()
+        self.changed = threading.Condition(self.lock)   # notified by push()
         self.mood = nova_mood.Tracker()     # the orb's colour flavour (tool in hand, tone of voice)
 
-    def push(self, kind: str, text: str = "", detail: str = "", **extra) -> None:
+    def push(self, kind: str, text: str = "", detail: str = "", **extra) -> int:
+        """Add one event and wake every long-poll. Returns the event's seq."""
         try:
             self.mood.on_event(kind, text, detail)
         except Exception:                     # noqa: BLE001 -- cosmetic, never break the feed
@@ -1597,9 +1605,26 @@ class Activity:
             self.events.append(event)
             if len(self.events) > self.LIMIT:
                 del self.events[: len(self.events) - self.LIMIT]
+            self.changed.notify_all()
+            return event["seq"]
 
-    def since(self, marker: int) -> dict:
-        with self.lock:
+    def since(self, marker: int, wait: float = 0.0) -> dict:
+        """Everything after `marker`. With `wait` (seconds, at most MAX_WAIT)
+        and nothing newer yet, hold on until something is pushed or the time
+        is up. The lock is free while waiting, and is let go before the
+        caller writes its response. A marker ahead of the count is a panel
+        from before a restart: it is answered at once so it can catch up."""
+        try:
+            wait = min(float(wait), self.MAX_WAIT) if float(wait) > 0 else 0.0   # NaN and junk: no wait
+        except (TypeError, ValueError):
+            wait = 0.0
+        deadline = time.monotonic() + wait
+        with self.changed:
+            while self.seq == marker:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                self.changed.wait(min(self.SLICE, left))
             return {
                 "seq": self.seq,
                 "events": [e for e in self.events if e["seq"] > marker],
@@ -2495,6 +2520,213 @@ def extract_json(stdout: str) -> dict | None:
     return None
 
 
+# ------------------------------------------------------------- brain view
+# The 3D map of her memory (~/.nova/brain) reads her turn from the activity
+# feed and /api/orb, and where she has been from /api/brain/trail.
+
+_WORDS = re.compile(r"[a-z0-9][a-z0-9'_-]+")     # nova_memory._terms' words, on lower-cased text
+
+
+def clean_terms(terms, said: str = "") -> list[str]:
+    """Search words fit to show: a word that looks like a secret is dropped.
+    The words arrive lower-cased and cut at dots, colons and equals signs, so
+    the pieces of a key (AKIA..., a bot token, a JWT, password=...) each pass
+    a look on their own. Given `said`, the text they came from, a word is
+    kept only if it is still there once that whole text is masked."""
+    kept = set(_WORDS.findall(mask_secrets(said).lower())) if said else None
+    out = []
+    for t in terms or []:
+        t = str(t)
+        if t and mask_secrets(t) == t and (kept is None or t in kept):
+            out.append(t)
+    return out
+
+
+def push_recall(activity: "Activity", seen: dict, said: str = "") -> bool:
+    """The brain view's "recall" beat for a question: the rows she was handed
+    (ids), the near misses (near), the diary days of the log lines (days) and
+    the words searched for (terms), as nova_memory.recall_block reported them.
+    `said` is the question itself, to mask the words against. Nothing at all
+    is not worth a beat."""
+    ids, near, days = (list(seen.get(k) or []) for k in ("ids", "near", "days"))
+    terms = clean_terms(seen.get("terms"), said)
+    if not (ids or near or days or terms):
+        return False
+    activity.push("recall", "Memory", f"{len(ids)} memories", ids=ids, near=near, days=days, terms=terms)
+    return True
+
+
+def orb_saying(voice) -> str:
+    """The sentence coming out of the speakers now (masked, at most 200
+    characters), or "" when she is not talking -- voice.saying outlives a
+    plain say(), so it only counts while the voice is busy."""
+    if not voice or not (getattr(voice, "speaking", False) or getattr(voice, "active", False)):
+        return ""
+    text = " ".join(str(getattr(voice, "saying", "") or "").split())
+    return mask_secrets(text)[:200] if text else ""
+
+
+_GAME = {"at": -1e9, "on": False}
+
+
+def gaming_now() -> bool:
+    """nova_events.gaming() -- a game in the foreground -- asked at most every 2 s."""
+    now = time.monotonic()
+    if now - _GAME["at"] >= 2.0:
+        try:
+            _GAME["on"] = bool(nova_events.gaming())
+        except Exception:                             # noqa: BLE001 -- cosmetic
+            _GAME["on"] = False
+        _GAME["at"] = now
+    return _GAME["on"]
+
+
+def pending_target(waiting: list) -> dict | None:
+    """{tool, target} of the action waiting for Sir's yes (the oldest), or None."""
+    if not waiting:
+        return None
+    first = min(waiting, key=lambda e: e.get("at") or 0)
+    detail = " ".join(str(first.get("detail") or "").split())
+    return {"tool": str(first.get("tool") or "tool"), "target": mask_secrets(detail)[:120]}
+
+
+TRAIL_SKIP = {"ToolSearch", "TodoWrite"}                # bookkeeping, not places she went
+TRAIL_FILE_TOOLS = {"Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "NotebookRead"}
+TRAIL_FOLDER_TOOLS = {"Grep", "Glob", "LS"}
+_HOME_POSIX = HOME.as_posix().rstrip("/")
+
+
+def trail_path(path: str) -> str:
+    """A path as the brain shows it: forward slashes, home as ~."""
+    p = str(path).strip().strip('"').replace("\\", "/")
+    m = re.match(r"^/([A-Za-z])/", p)                   # Git Bash's /c/Users/...
+    if m:
+        p = m.group(1) + ":/" + p[3:]
+    p = p[:1] + re.sub(r"/{2,}", "/", p[1:])            # keeps a leading // (a network share)
+    if re.match(r"^[a-z]:", p):
+        p = p[0].upper() + p[1:]
+    low, home = p.lower(), _HOME_POSIX.lower()
+    if low == home or low.startswith(home + "/"):
+        p = "~" + p[len(home):]
+    return p.rstrip("/") if len(p) > 1 and not p.endswith(":/") else p
+
+
+def trail_url(url: str) -> tuple[str, str]:
+    """(host, host+path) of a web address, or ("", "") if it is not one.
+    No query string or fragment: that is where tokens live."""
+    u = str(url).strip()
+    if "://" not in u:
+        u = "https://" + u                            # web_open takes "react.dev" too
+    try:
+        parts = urllib.parse.urlsplit(u)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return "", ""
+    if parts.scheme not in ("http", "https") or not host or " " in host:
+        return "", ""
+    host = host[4:] if host.startswith("www.") else host
+    return host, host + parts.path.rstrip("/")
+
+
+_TRAIL_KEYS = re.compile(r'"(file_path|notebook_path|path|pattern|url)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def trail_args(rest: str) -> dict:
+    """A trace line's arguments. nova_skills.describe_call cuts the JSON at 220
+    characters, so a long one only yields its complete "key": "value" pairs."""
+    if not rest:
+        return {}
+    try:
+        args = json.loads(rest)
+        return args if isinstance(args, dict) else {}
+    except ValueError:
+        pass
+    out: dict = {}
+    for m in _TRAIL_KEYS.finditer(rest):
+        try:
+            out.setdefault(m.group(1), json.loads('"' + m.group(2) + '"'))
+        except ValueError:
+            pass
+    if '"urls"' in rest:
+        out["urls"] = re.findall(r'"(https?://[^"\\\s]+)"', rest)
+    return out
+
+
+def trail_places(line: str) -> list[tuple[str, str, str]]:
+    """The places one trace line ("name {json args}") touched, as
+    (kind, key, target) with kind file | folder | site | page | tool."""
+    line = line.split("  -> FAILED:", 1)[0].strip()
+    name, _, rest = line.partition(" ")
+    rest = rest.strip()
+    if (not re.fullmatch(r"[A-Za-z][\w.:-]{0,79}", name) or name in TRAIL_SKIP
+            or (rest and not rest.startswith("{"))):     # the clipped tail of a long turn
+        return []
+    args = trail_args(rest)
+    file_path = args.get("file_path") or args.get("notebook_path")
+    if name in TRAIL_FILE_TOOLS or isinstance(file_path, str):
+        if isinstance(file_path, str) and file_path.strip():
+            p = trail_path(file_path)
+            return [("file", p.lower(), p)]
+        return []                                       # the path was cut off: nowhere to put it
+    if name in TRAIL_FOLDER_TOOLS:
+        folder = args.get("path")
+        if not folder and name == "Glob" and isinstance(args.get("pattern"), str):
+            # Glob with no path: the fixed start of an absolute pattern, if any
+            head = re.split(r"[*?\[{]", args["pattern"], maxsplit=1)[0].replace("\\", "/")
+            folder = head.rsplit("/", 1)[0] if "/" in head and re.match(r"^([A-Za-z]:|~|/)", head) else ""
+        if isinstance(folder, str) and folder.strip():
+            p = trail_path(folder)
+            return [("folder", p.lower(), p)]
+        return []                                       # the working folder: not known here
+    urls = [args["url"]] if isinstance(args.get("url"), str) else []
+    if isinstance(args.get("urls"), list):
+        urls += [u for u in args["urls"] if isinstance(u, str)]
+    out = []
+    for u in urls[:8]:
+        host, page = trail_url(u)
+        if host:
+            out.append(("site", host, host))
+            if page != host:
+                out.append(("page", page, page))
+    return out or [("tool", name, name)]
+
+
+def brain_trail(days: int = 30, limit: int = 300) -> list[dict]:
+    """Where she has been in the last `days` days, most used first: the files
+    and folders she opened, the sites and pages she read and the tools she
+    used, as {kind, target, uses, last}. Read-only from nova_history's
+    turns.tools; a missing or empty history is just an empty trail."""
+    days = max(1, min(int(days), nova_history.KEEP_DAYS))
+    db_file = Path(nova_history.DB_FILE)
+    if not db_file.is_file():
+        return []
+    since = time.strftime("%Y-%m-%d", time.localtime(time.time() - days * 86400))
+    try:
+        db = sqlite3.connect(db_file.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            rows = db.execute("SELECT at, tools FROM turns WHERE day >= ? AND tools != '' ORDER BY id",
+                              (since,)).fetchall()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return []
+    seen: dict[tuple, dict] = {}
+    for at, tools in rows:
+        for line in str(tools).split("\n"):
+            for kind, key, target in trail_places(line):
+                e = seen.get((kind, key))
+                if e is None:
+                    seen[(kind, key)] = {"kind": kind, "target": target, "uses": 1, "last": at}
+                else:
+                    e["uses"] += 1
+                    if at >= e["last"]:
+                        e["last"], e["target"] = at, target      # the newest spelling wins
+    top = sorted(seen.values(), key=lambda e: (e["uses"], e["last"], e["target"]), reverse=True)[:limit]
+    for e in top:
+        e["target"] = mask_secrets(e["target"])
+    return top
+
+
 # ------------------------------------------------------------------- server
 
 class Handler(BaseHTTPRequestHandler):
@@ -2631,8 +2863,82 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(html.encode("utf-8"), "text/html; charset=utf-8")
             return
 
+        # The brain view: a 3D map of her memory that lights up as she works.
+        # Its code (brain/app) and vendored three.js (brain/lib) are plain ES
+        # modules with no secrets in them -- an ES module import cannot carry
+        # the token header -- so only .js files under those two folders are
+        # served before the gate. The page itself and its data are gated.
+        for sub in ("lib", "app"):
+            prefix = f"/brain/{sub}/"
+            if route.startswith(prefix):
+                base = (ROOT / "brain" / sub).resolve()
+                lib = (base / route[len(prefix):]).resolve()
+                if route.endswith(".js") and base in lib.parents and lib.is_file():
+                    self.send_text(lib.read_bytes(), "text/javascript; charset=utf-8")
+                else:
+                    self.send_text(b"// not found", "text/javascript; charset=utf-8", 404)
+                return
+        if route == "/brain":
+            if not self.authorized():
+                self.send_text(b"Forbidden: missing or bad token.", "text/plain; charset=utf-8", 403)
+                return
+            try:
+                html = (ROOT / "brain" / "brain.html").read_text(encoding="utf-8")
+            except OSError:
+                self.send_text(b"brain/brain.html is missing from ~/.nova/", "text/plain; charset=utf-8", 500)
+                return
+            self.send_text(html.replace("__NOVA_TOKEN__", self.server.token).encode("utf-8"),
+                           "text/html; charset=utf-8")
+            return
+
         if not self.authorized():
             self.send_json({"error": "forbidden"}, 403)
+            return
+
+        if route == "/api/brain":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            try:
+                since = max(-1, min(int((q.get("since") or ["0"])[0] or 0), 2 ** 62))  # SQLite's int range
+            except ValueError:                  # since=NaN used to kill the request with no answer
+                self.send_json({"error": "bad_request", "detail": "since must be a row id."}, 400)
+                return
+            out = nova_memory.brain_rows(since)
+            for r in out["rows"]:
+                r["text"] = mask_secrets(r["text"])
+            if since == 0:
+                skills = []
+                try:
+                    for f in sorted(nova_skills.SKILLS_DIR.glob("*.md")):
+                        skills.append({"name": f.stem, "text": mask_secrets(f.read_text(encoding="utf-8")[:700])})
+                except OSError:
+                    pass
+                out["skills"] = skills
+                try:
+                    out["profile"] = mask_secrets((ROOT / "profile.md").read_text(encoding="utf-8")[:6000])
+                except OSError:
+                    out["profile"] = ""
+            self.send_json(out)
+            return
+
+        if route == "/api/brain/match":
+            # What her recall tool would get for q (ids), what nearly matched
+            # (near) and the words searched for (terms).
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            asked = (q.get("q") or [""])[0][:300]
+            got = nova_memory.match(asked)
+            self.send_json({"ids": got["ids"], "near": got["near"], "terms": clean_terms(got["terms"], asked)})
+            return
+
+        if route == "/api/brain/trail":
+            # Where she has been in the last N days (files, folders, sites,
+            # pages, tools), most used first: the brain view seeds its places
+            # from this on first load. A bare list, [] when there is nothing.
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            try:
+                days = int(float((q.get("days") or ["30"])[0]))
+            except (ValueError, OverflowError):
+                days = 30
+            self.send_json(brain_trail(days))
             return
 
         if route == "/api/telegram":
@@ -2682,7 +2988,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/activity":
             # Everything that happened after the marker the panel last saw.
-            marker = 0
+            # With wait=S (seconds, at most 8) the request is held open until
+            # something happens -- a long-poll, so the brain view sees an
+            # event the moment it is pushed instead of on the next poll.
+            marker, wait = 0, 0.0
             query = self.path.split("?", 1)[1] if "?" in self.path else ""
             for part in query.split("&"):
                 if part.startswith("since="):
@@ -2690,7 +2999,16 @@ class Handler(BaseHTTPRequestHandler):
                         marker = int(part[6:])
                     except ValueError:
                         marker = 0
-            self.send_json(self.server.activity.since(marker))
+                elif part.startswith("wait="):
+                    try:
+                        wait = float(part[5:])
+                    except ValueError:
+                        wait = 0.0
+            out = self.server.activity.since(marker, wait)     # the lock is free again here
+            try:
+                self.send_json(out)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass                                # the page went away while it waited
             return
 
         if route == "/api/listen":
@@ -2771,7 +3089,13 @@ class Handler(BaseHTTPRequestHandler):
             out = {"mode": mode, "flavour": tracker.flavour(mode),
                    "level": voice.level if voice else 0.0,
                    "brain": self.server.backend.brain,
-                   "jobs": sum(1 for j in self.server.jobs.list() if j["state"] == "running")}
+                   "jobs": sum(1 for j in self.server.jobs.list() if j["state"] == "running"),
+                   # For the brain view: the sentence she is saying, whether a
+                   # game has the screen, and what is waiting for his yes. No
+                   # "mic": the ears keep their input level to themselves.
+                   "saying": orb_saying(voice),
+                   "game": gaming_now(),
+                   "pending": pending_target(self.server.permissions.waiting())}
             if "panel=1" in self.path:
                 # The dashboard mirrors the orb, and also shows the last
                 # exchange when it happened by voice with no panel involved.
@@ -2914,6 +3238,21 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeDecodeError):
                 self.send_json({"error": "bad_request", "detail": "Body was not valid JSON."}, 400)
                 return
+
+        if route == "/api/dev/activity" and os.environ.get("NOVA_TEST"):
+            # Fixture playback for the brain view: an event pushed into the
+            # feed as if she had done it. Only a TEST bridge has this door; on
+            # the real one the route does not exist (404 below).
+            kind = body.get("kind") if isinstance(body, dict) else None
+            if not isinstance(kind, str) or not kind.strip():
+                self.send_json({"error": "bad_request", "detail": "Send {kind, text, detail, ...}."}, 400)
+                return
+            # ("self" too: as a keyword it would collide with push()'s own self)
+            extra = {str(k): v for k, v in body.items() if k not in ("kind", "text", "detail", "seq", "at", "self")}
+            seq = self.server.activity.push(kind.strip()[:40], str(body.get("text") or ""),
+                                            str(body.get("detail") or ""), **extra)
+            self.send_json({"ok": True, "seq": seq})     # this event's own seq, even if another lands at once
+            return
 
         if route == "/api/tts":
             # Her own voice for the phone's live call, as a WAV. From outside,
@@ -3639,12 +3978,18 @@ class Handler(BaseHTTPRequestHandler):
             # few matches travel with the prompt, so memory can grow without
             # every request carrying all of it.
             asked = prompt
-            recalled = nova_memory.recall_block(prompt)
+            seen: dict = {}                 # what this recall really handed over (this request's own copy)
+            recalled = nova_memory.recall_block(prompt, info=seen)
             if forgotten:
                 asked += ("\n\n[You have just deleted this from your memory at his "
                           "request: " + "; ".join(forgotten) + "]")
             if recalled:
                 asked += "\n\n" + recalled
+            if profile in ("owner", "remote"):
+                # The brain view lights up exactly the rows she was handed,
+                # rings the near misses and drops the searched-for words into
+                # the hole -- an empty recall still shows its words.
+                push_recall(self.server.activity, seen, prompt)
             # A recipe she wrote herself the last time she did this kind of task.
             if profile in ("owner", "remote"):
                 try:
@@ -3654,7 +3999,9 @@ class Handler(BaseHTTPRequestHandler):
                     log(f"skill recall failed: {exc}")
                 if how:
                     asked += "\n\n" + how
-                    log("skill recalled: " + how.split("### ", 1)[1].split("\n", 1)[0][:60])
+                    skill_name = how.split("### ", 1)[1].split("\n", 1)[0][:60]
+                    log("skill recalled: " + skill_name)
+                    self.server.activity.push("recall", "Skill", skill_name, skill=skill_name)
             turn_began = time.time()
 
             # "Fix this", "what does that error mean": send along what he is
