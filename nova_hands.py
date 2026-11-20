@@ -156,6 +156,12 @@ def token() -> str:
 def taint(source: str) -> None:
     """Tell the bridge she has just read outside content."""
     try:
+        import nova_gate
+        if nova_gate.is_teams_host(source):
+            return                                    # Sir's rule: Teams is fully open, no gate (sending is blocked instead)
+    except Exception:                                 # noqa: BLE001
+        pass
+    try:
         req = urllib.request.Request(BRIDGE + "/api/taint", data=json.dumps({"source": source}).encode(),
                                      headers={"Content-Type": "application/json", "X-Nova-Token": token()})
         urllib.request.urlopen(req, timeout=2).close()
@@ -335,6 +341,37 @@ class Hands:
             raise PermissionError(f"{what} refused: {host(page.url)} is read-only for Nova "
                                   "(Meta apps are read-only by Sir's rule; on Gmail use gmail_send / gmail_reply).")
 
+    @staticmethod
+    def _label(el) -> str:
+        try:
+            return el.evaluate("e => [e.getAttribute('aria-label'), e.getAttribute('title'), "
+                               "e.getAttribute('placeholder'), (e.innerText || e.value || '').slice(0, 80)]"
+                               ".filter(Boolean).join(' ')") or ""
+        except Exception:                             # noqa: BLE001
+            return ""
+
+    def _teams_click_guard(self, page, el) -> None:
+        import nova_gate
+        if nova_gate.is_teams_host(host(page.url)) and nova_gate.teams_send_click(self._label(el)):
+            raise PermissionError(nova_gate.TEAMS_NO_SEND)
+
+    def _teams_send_field(self, page, el) -> bool:
+        """True when Enter here would send a Teams message (a message box, not search)."""
+        import nova_gate
+        if not nova_gate.is_teams_host(host(page.url)):
+            return False
+        body = ("({editable: !!(e && (e.isContentEditable || e.tagName === 'TEXTAREA')), "
+                "label: e ? [e.getAttribute('aria-label'), e.getAttribute('placeholder'), e.getAttribute('role')]"
+                ".filter(Boolean).join(' ') : ''})")
+        try:
+            if el is not None:
+                info = el.evaluate("e => " + body)
+            else:
+                info = page.evaluate("() => { const e = document.activeElement; return " + body + "; }")
+        except Exception:                             # noqa: BLE001 -- unsure: treat as a message box
+            return True
+        return nova_gate.teams_enter_sends("enter", info.get("label", ""), info.get("editable", True))
+
     def _snapshot(self, page, max_chars: int = MAX_TEXT, mark: bool = True) -> dict:
         self._settle(page)
         text = page.inner_text("body") if page.url != "about:blank" else ""
@@ -482,7 +519,9 @@ class Hands:
         page = self.page()
         self._guard(page, "Clicking")
         before = len(self.browser().pages)
-        self._target(page, target).click()
+        el = self._target(page, target)
+        self._teams_click_guard(page, el)
+        el.click()
         time.sleep(0.6)
         pages = self.browser().pages
         if len(pages) > before:                       # it opened a new tab: follow it
@@ -498,6 +537,9 @@ class Hands:
         page = self.page()
         self._guard(page, "Typing")
         el = self._target(page, target)
+        if enter and self._teams_send_field(page, el):
+            import nova_gate
+            raise PermissionError(nova_gate.TEAMS_NO_SEND)
         el.fill(text)
         if enter:
             el.press("Enter")
@@ -506,6 +548,10 @@ class Hands:
     def do_press(self, keys: str) -> dict:
         page = self.page()
         self._guard(page, "Key presses")
+        import nova_gate
+        if nova_gate.is_teams_host(host(page.url)) and nova_gate.teams_enter_sends(keys):
+            if self._teams_send_field(page, None):
+                raise PermissionError(nova_gate.TEAMS_NO_SEND)
         page.keyboard.press(keys)
         return self._snapshot(page)
 

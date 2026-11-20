@@ -51,6 +51,7 @@ import nova_telegram  # noqa: E402
 import nova_skills  # noqa: E402
 import nova_history  # noqa: E402
 import nova_phoneline  # noqa: E402
+import nova_gate  # noqa: E402
 
 try:                        # "play X on Spotify" with no model (nova_spotify.py)
     import nova_spotify
@@ -1328,7 +1329,7 @@ def claude_args(cfg: dict) -> list[str]:
         return args[:i] + args[i + 2:] + ["--tools", ""]
     if channel == "public":
         args += ["--tools", ""]
-    elif channel == "remote":
+    elif channel in ("remote", "watch"):
         args += ["--tools", "Read,Grep,Glob,WebSearch,ToolSearch"]
     else:
         args += ["--tools", "Read,Edit,Write,Glob,Grep,Bash,WebFetch,WebSearch,ToolSearch,NotebookEdit"]
@@ -1340,6 +1341,19 @@ def claude_args(cfg: dict) -> list[str]:
         args += ["--allowedTools", "mcp__nova__server_status", "mcp__nova__minecraft_players"]
         args += ["--disallowedTools", "Bash", "Write", "Edit", "NotebookEdit", "Read", "Glob",
                  "Grep", "WebFetch", "WebSearch", "Task"]
+        return args
+    if channel == "watch":
+        # Her own standing-order checks (keep_watch): Sir gave the order himself,
+        # on this PC. She may look at everything, including through her own
+        # Chrome and the desktop (Teams, pages, windows) and click to move
+        # around, but never type, send or change anything. The old "remote"
+        # profile stripped every web tool, so the Teams watch could never run.
+        looking = nova_tool_names("free") + ["mcp__nova__web_click", "mcp__nova__desktop_click",
+                                             "mcp__nova__desktop_click_at", "mcp__nova__desktop_scroll"]
+        args += ["--allowedTools"] + READ_TOOLS + looking
+        args += ["--disallowedTools", "Bash", "Write", "Edit", "NotebookEdit", "mcp__nova__web_type",
+                 "mcp__nova__web_keys", "mcp__nova__desktop_type", "mcp__nova__desktop_keys",
+                 "mcp__nova__gmail_send", "mcp__nova__gmail_reply", *SECRET_READS]
         return args
     if channel == "remote":
         # Sir himself, but not at the PC (phone, Pocket Nova). He can look and
@@ -3446,7 +3460,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/api/taint":
-            TAINT.update(at=time.time(), source=str(body.get("source") or "web")[:40])
+            src = str(body.get("source") or "web")
+            if nova_gate.is_teams_host(src) or nova_gate.is_teams_window(src):
+                # Sir, 2026-11-21: Teams is fully open, no gate. Sending there is
+                # refused in nova_hands / nova_desk instead.
+                self.send_json({"ok": True, "skipped": "teams"})
+                return
+            log(f"taint: {src[:60]}")
+            TAINT.update(at=time.time(), source=src[:40])
             self.send_json({"ok": True})
             return
 
@@ -4654,7 +4675,7 @@ def main() -> int:
         """
         if httpd.usage.over("claude"):
             return None
-        watcher = guest("remote", key="watch")
+        watcher = guest("watch", key="watch")
         try:
             out = watcher.ask(prompt, None, True, timeout=150)
         finally:

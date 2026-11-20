@@ -38,6 +38,12 @@ def _auto():
 
 def taint(source: str) -> None:
     try:
+        import nova_gate
+        if nova_gate.is_teams_window(source):
+            return                                    # Sir's rule: Teams is fully open, no gate (sending is blocked instead)
+    except Exception:                                 # noqa: BLE001
+        pass
+    try:
         tok = (ROOT / "token").read_text(encoding="utf-8-sig").strip()
         req = urllib.request.Request("http://127.0.0.1:8765/api/taint", data=json.dumps({"source": source}).encode(),
                                      headers={"Content-Type": "application/json", "X-Nova-Token": tok})
@@ -88,12 +94,31 @@ def _guard(win, what: str) -> None:
                               "she never types or clicks there.")
 
 
+def _teams_guard(win, what: str, label: str = "", enter: bool = False, field: str = "") -> None:
+    """Sir's one Teams rule: never send a message in a Teams group or chat."""
+    import nova_gate
+    if not nova_gate.is_teams_window(win.Name if win else ""):
+        return
+    if (what == "Clicking" and nova_gate.teams_send_click(label)) or \
+            (enter and nova_gate.teams_enter_sends("enter", field, True)):
+        raise PermissionError(nova_gate.TEAMS_NO_SEND)
+
+
+def _focused_name() -> str:
+    try:
+        f = _auto().GetFocusedControl()
+        return f.Name or "" if f else ""
+    except Exception:                                 # noqa: BLE001
+        return ""
+
+
 def _guard_point(x, y, what: str) -> None:
     """A click by screen position lands on whatever is THERE now, which may not
     be the window that was looked at. Check the window under the point."""
     ctrl = _auto().ControlFromPoint(int(x), int(y))
     if ctrl:
         _guard(ctrl.GetTopLevelControl(), what)
+        _teams_guard(ctrl.GetTopLevelControl(), what, ctrl.Name or "")
 
 
 def look(window: str = "", limit: int = 80) -> str:
@@ -117,7 +142,7 @@ def look(window: str = "", limit: int = 80) -> str:
                 break
         LAST.parent.mkdir(parents=True, exist_ok=True)
         LAST.write_text(json.dumps({"window": win.Name, "items": found}), encoding="utf-8")
-        taint("desktop")
+        taint(win.Name if "microsoft teams" in (win.Name or "").lower() else "desktop")
         return f"Window: {win.Name}\n" + "\n".join(f"[{i['n']}] {i['type']}: {i['name'] or '(text box)'}"
                                                    for i in found)
 
@@ -153,6 +178,8 @@ def click(target: str, window: str = "", double: bool = False, right: bool = Fal
         _guard(win, "Clicking")
         win.SetActive()
         ctrl, xy = _find(win, target)
+        if not xy:
+            _teams_guard(win, "Clicking", ctrl.Name or "")
         if xy:
             _guard_point(*xy, "Clicking")
             fn = auto.RightClick if right else (auto.DoubleClick if double else auto.Click)
@@ -176,6 +203,7 @@ def click_at(x: int, y: int, double: bool = False, right: bool = False) -> str:
         ctrl = auto.ControlFromPoint(int(x), int(y))
         if ctrl:
             _guard(ctrl.GetTopLevelControl(), "Clicking")
+            _teams_guard(ctrl.GetTopLevelControl(), "Clicking", ctrl.Name or "")
         (auto.RightClick if right else auto.DoubleClick if double else auto.Click)(int(x), int(y))
         return f"Clicked at {x},{y}" + (f" ({ctrl.Name[:40]})" if ctrl and ctrl.Name else "") + "."
 
@@ -209,6 +237,7 @@ def set_text(target: str, text: str, window: str = "", enter: bool = False) -> s
         _guard(win, "Typing")
         win.SetActive()
         ctrl, xy = _find(win, target)
+        _teams_guard(win, "Typing", enter=enter, field=f"{target} {'' if xy else (ctrl.Name or '')}")
         if xy:
             _guard_point(*xy, "Typing")
             auto.Click(*xy)
@@ -239,6 +268,9 @@ def keys(combo: str, window: str = "") -> str:
         win = _window(window)
         _guard(win, "Key presses")
         win.SetActive()
+        import nova_gate
+        if nova_gate.is_teams_window(win.Name) and nova_gate.teams_enter_sends(combo, _focused_name()):
+            raise PermissionError(nova_gate.TEAMS_NO_SEND)
         parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
         seq = "".join("{" + KEYMAP.get(p, p.upper() if re.fullmatch(r"f\d{1,2}", p) else p) + "}" for p in parts)
         auto.SendKeys(seq, waitTime=0.1)

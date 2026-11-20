@@ -1501,6 +1501,13 @@ TAINT_OK = {"web_click", "web_type", "web_keys", "open_settings", "remember", "r
             "spotify_play"}
 
 
+ALWAYS_LOAD = {"web_open", "web_read", "web_click", "web_type", "web_keys", "web_find", "web_text",
+               "web_extract", "web_screenshot", "web_scroll", "web_back", "web_tabs", "web_show",
+               "web_search", "desktop_look", "desktop_click", "desktop_click_at", "desktop_scroll",
+               "desktop_type", "desktop_keys", "capture_screen", "read_screen",
+               "keep_watch", "list_watches", "cancel_watch", "remember"}
+
+
 def tier(name: str) -> str:
     return TIERS.get(name.split("__")[-1], "confirm")
 
@@ -1533,7 +1540,13 @@ def main() -> int:
     from mcp.server.mcpserver import MCPServer
     server = MCPServer("nova")
     for fn in ALL:
-        server.tool()(fn)
+        # Her page-reading / page-driving / screen tools are always in the prompt,
+        # never deferred behind ToolSearch: every new session (and every watch
+        # check) used to start without them (Sir, 2026-11-21).
+        if fn.__name__ in ALWAYS_LOAD:
+            server.tool(meta={"anthropic/alwaysLoad": True})(fn)
+        else:
+            server.tool()(fn)
     # The permission-prompt tool must answer with ONE plain text block holding
     # the {"behavior": ...} JSON. With structured output on (the library's
     # default) the CLI reads the {"result": ...} wrapper instead and rejects it

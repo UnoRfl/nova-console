@@ -487,6 +487,42 @@ def spoken_answer(text: str) -> bool | None:
     return None
 
 
+
+# ------------------------------------------------------------ Microsoft Teams
+# Sir, 2026-11-21: Nova has FULL access to his Microsoft Teams (every tab,
+# class, channel, Assignments, Calendar...) with no safety gate -- reading
+# Teams does not taint the request. The ONE restriction: she never sends a
+# message in a Teams group or chat. So the send itself is blocked in code:
+# a Send/Post button, Enter (or Ctrl+Enter) in a message box, and type+Enter.
+TEAMS_HOSTS = re.compile(r"(?:^|\.)(?:teams\.cloud\.microsoft|teams\.microsoft\.com|teams\.live\.com)\.?$", re.I)
+SEND_LABEL = re.compile(r"\bsend\b|^\s*post\b(?!s)|\bpost (?:message|reply|in channel)\b|\breply all\b", re.I)
+SEARCH_LABEL = re.compile(r"search|find|go right to|filter|jump to|look up", re.I)
+TEAMS_NO_SEND = ("Refused: Nova never sends messages in Sir's Teams groups or chats (his rule). "
+                 "Everything else in Teams is open: tabs, classes, channels, Assignments, files.")
+
+
+def is_teams_host(host: str) -> bool:
+    return bool(TEAMS_HOSTS.search(str(host or "").strip().lower()))
+
+
+def is_teams_window(title: str) -> bool:
+    return "microsoft teams" in str(title or "").lower()
+
+
+def teams_send_click(label: str) -> bool:
+    """A click on this control would send/post a message."""
+    return bool(SEND_LABEL.search(" ".join(str(label or "").split())))
+
+
+def teams_enter_sends(keys: str, field_label: str = "", editable: bool = True) -> bool:
+    """Enter / Ctrl+Enter in a Teams message box sends it. Enter in a search box does not."""
+    if "enter" not in str(keys or "").lower() and "return" not in str(keys or "").lower():
+        return False
+    if SEARCH_LABEL.search(str(field_label or "")):
+        return False
+    return bool(editable)
+
+
 if __name__ == "__main__":
     tool = sys.argv[1] if len(sys.argv) > 1 else "Bash"
     arg = " ".join(sys.argv[2:])
