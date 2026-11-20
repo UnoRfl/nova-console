@@ -123,6 +123,44 @@
   #bAB .half{fill:currentColor;stroke:none}
   #bAB[aria-pressed="false"] .half{opacity:.25}
 
+  /* ---------------------------------------------------------- notes reader (Claude's notes, merged SecondBrain) */
+  #reader{position:fixed;left:28px;top:calc(var(--top) + 118px);bottom:84px;width:min(400px,calc(100vw - var(--inset) - 56px));z-index:7;display:flex;flex-direction:column;
+    border-radius:14px;background:rgba(14,14,17,.86);border:1px solid rgba(255,255,255,.08);box-shadow:0 18px 48px rgba(0,0,0,.5);
+    opacity:0;visibility:hidden;transform:translateX(-10px);transition:opacity .22s var(--out),transform .26s var(--out),visibility 0s .26s}
+  #reader.on{opacity:1;visibility:visible;transform:none;transition:opacity .22s var(--out),transform .26s var(--out)}
+  #reader .hd{display:flex;align-items:center;gap:6px;padding:10px 10px 8px 12px;border-bottom:1px solid rgba(255,255,255,.06)}
+  #reader .hd button{flex:none;width:26px;height:26px;border-radius:32%;border:0;background:none;color:rgba(242,242,243,.55);display:grid;place-items:center;cursor:pointer;padding:0}
+  #reader .hd button:hover{background:rgba(255,255,255,.06);color:var(--ink)}
+  #reader .hd svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+  #reader input{flex:1;min-width:0;height:28px;border:0;border-radius:8px;background:rgba(255,255,255,.05);color:var(--ink);font:400 12.5px var(--font);padding:0 10px;outline:none}
+  #reader input::placeholder{color:rgba(242,242,243,.34)}
+  #reader input::-webkit-search-cancel-button{-webkit-appearance:none;appearance:none}
+  #reader input:focus{background:rgba(255,255,255,.08)}
+  #reader .bd{flex:1;overflow-y:auto;padding:6px 4px 14px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent}
+  #reader .it{display:block;width:100%;text-align:left;border:0;background:none;color:inherit;padding:8px 10px;border-radius:9px;cursor:pointer;font:inherit}
+  #reader .it:hover,#reader .it.sel{background:rgba(255,255,255,.055)}
+  #reader .it b{display:block;font:500 12.5px/1.35 var(--font);color:var(--ink)}
+  #reader .it span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font:400 11.5px/1.4 var(--font);color:rgba(242,242,243,.48);margin-top:2px}
+  #reader .nt{padding:6px 12px 0}
+  #reader .nt h1{font:500 17px/1.3 var(--font);margin:4px 0 2px;color:var(--ink);letter-spacing:-.01em}
+  #reader .nt .k{font:600 10px/14px var(--font);letter-spacing:.08em;text-transform:uppercase;color:rgba(242,242,243,.34);margin-bottom:10px}
+  #reader .md{font:400 12.5px/1.6 var(--font);color:rgba(242,242,243,.78);word-break:break-word}
+  #reader .md p,#reader .md ul,#reader .md ol{margin:0 0 9px}
+  #reader .md ul,#reader .md ol{padding-left:18px}
+  #reader .md li{margin:2px 0}
+  #reader .md h2,#reader .md h3,#reader .md h4{font:600 12.5px/1.4 var(--font);color:var(--ink);margin:14px 0 5px}
+  #reader .md strong{font-weight:600;color:var(--ink)}
+  #reader .md code{font:12px var(--mono);background:rgba(255,255,255,.06);border-radius:4px;padding:0 4px}
+  #reader .md pre{font:11.5px/1.5 var(--mono);background:rgba(255,255,255,.04);border-radius:8px;padding:8px 10px;overflow-x:auto;margin:0 0 9px;white-space:pre}
+  #reader .md .hl{background:rgba(255,217,163,.09);box-shadow:-6px 0 0 rgba(255,217,163,.09),6px 0 0 rgba(255,217,163,.09);border-radius:3px}
+  #reader .wl{color:var(--gold);cursor:pointer;border-bottom:1px solid rgba(255,217,163,.28)}
+  #reader .wl:hover{border-bottom-color:var(--gold)}
+  #reader .lk{margin-top:16px;padding-top:10px;border-top:1px solid rgba(255,255,255,.06)}
+  #reader .lk h5{font:600 10px/14px var(--font);letter-spacing:.08em;text-transform:uppercase;color:rgba(242,242,243,.34);margin:0 0 6px}
+  #reader .lk h5+div{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+  #reader .ch{border:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.03);color:rgba(242,242,243,.8);font:400 11.5px/1 var(--font);padding:6px 9px;border-radius:7px 3px 7px 3px;cursor:pointer}
+  #reader .ch:hover{border-color:rgba(255,217,163,.4);color:var(--ink)}
+  #reader .empty{padding:18px 12px;color:rgba(242,242,243,.4);font-size:12px}
   /* ---------------------------------------------------------- reduced motion: fades only */
   body.reduced #q,body.reduced .lb span,body.reduced #card .in{transform:none!important}
   body.reduced #trail .row{transition:opacity .2s linear}
@@ -149,6 +187,7 @@
   <div id="trail" role="log" aria-label="What Nova is doing"></div>
   <div id="dock" role="toolbar" aria-label="View">
     <button id="bReplay" type="button" aria-label="Replay turn" hidden><svg viewBox="0 0 14 14"><path d="M2.6 7a4.4 4.4 0 1 0 1.3-3.1"/><path d="M3.4 1.7v2.6H6"/></svg></button>
+    <button id="bNotes" type="button" aria-label="Notes" aria-pressed="false"><svg viewBox="0 0 14 14"><path d="M3.5 1.8h5l2.5 2.5v7.9h-7.5z"/><path d="M5.3 6.6h3.4M5.3 9h3.4"/></svg></button>
     <button id="bAB" type="button" aria-label="Compare look" aria-pressed="true"><svg viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/><path class="half" d="M7 2a5 5 0 0 1 0 10z"/></svg></button>
     <button id="bFollow" type="button" aria-label="Follow Nova" aria-pressed="true"><svg viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/><circle class="dot" cx="7" cy="7" r="2.1"/></svg></button>
   </div>
@@ -156,6 +195,7 @@
 </div>
 <div id="toasts" aria-live="polite"></div>
 <div id="card"></div>
+<div id="reader" role="dialog" aria-label="Notes"><div class="hd"><button id="rBack" type="button" aria-label="All notes" hidden><svg viewBox="0 0 14 14"><path d="M8.5 3 4.5 7l4 4"/></svg></button><input id="rQ" type="search" placeholder="Search notes" autocomplete="off" spellcheck="false"><button id="rX" type="button" aria-label="Close"><svg viewBox="0 0 14 14"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg></button></div><div class="bd" id="rBody"></div></div>
 <div id="tip"></div>
 <div id="boot"></div>
 <script type="module" src="/brain/app/main.js"></script>

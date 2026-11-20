@@ -3,8 +3,8 @@
 // cards, letterbox, 3D labels, cluster-label hygiene, tooltip, detail card, dock.
 // DOM is pooled at init; per-frame work only toggles classes when a value changes.
 
-import { bus, state, stars, overlay, project, onFrame, fxu, toHost, setLensSky, look, ST, REDUCED, EMBED, wake } from './core.js';
-import { graph, nodeOf, neighbours } from './data.js';
+import { bus, state, stars, overlay, project, onFrame, fxu, toHost, setLensSky, look, ST, REDUCED, EMBED, wake, api } from './core.js';
+import { graph, nodeOf, neighbours, noteNode, noteOfStar } from './data.js';
 import { INTER_WOFF2 } from './font-inter.js';
 
 const $ = id => document.getElementById(id);
@@ -231,6 +231,126 @@ function showCard(idx) {
   cardH.o.idx = idx; requestAnimationFrame(() => el.classList.add('on'));
 }
 
+/* ------------------------------------------------------------------ notes reader (Claude's notes) */
+// The merged SecondBrain: every project topic star is one of Claude's memory notes. A list with search, the full
+// note, its Links and Linked-from chips. Note text is built with text nodes only, never innerHTML.
+const R = { el: null, body: null, q: null, back: null, btn: null, open: false, topic: '', cache: new Map(), seq: 0, qT: 0 };
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const alnum = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const titleOf = t => (graph.notes.get(t) || {}).title || t;
+function inline(text, into) {
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[\[[^\]]+\]\]|\[[^\]]+\]\([^)\s]+\))/g;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    into.append(text.slice(last, m.index)); last = m.index + m[0].length;
+    const t = m[0];
+    if (t.startsWith('**')) into.append(el('strong', '', t.slice(2, -2)));
+    else if (t.startsWith('`')) into.append(el('code', '', t.slice(1, -1)));
+    else if (t.startsWith('[[')) { const [slug, alias] = t.slice(2, -2).split('|'); const s = el('span', 'wl', alias || titleOf(slug.trim())); s.dataset.topic = slug.trim(); into.append(s); }
+    else into.append(t.slice(1, t.indexOf('](')));
+  }
+  into.append(text.slice(last));
+}
+function renderMd(src, box) {
+  const lines = String(src || '').replace(/\r/g, '').split('\n');
+  let para = [], list = null;
+  const flush = () => { if (para.length) { const p = el('p'); inline(para.join(' '), p); box.append(p); para = []; } };
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i], st = ln.trim();
+    if (st.startsWith('```')) {
+      flush(); list = null; const code = [];
+      while (++i < lines.length && !lines[i].trim().startsWith('```')) code.push(lines[i]);
+      box.append(el('pre', '', code.join('\n'))); continue;
+    }
+    if (!st) { flush(); list = null; continue; }
+    const h = st.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { flush(); list = null; const e = el('h' + Math.min(4, h[1].length + 1)); inline(h[2], e); box.append(e); continue; }
+    const li = ln.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+    if (li) {
+      flush();
+      const ordered = /\d/.test(li[2]);
+      if (!list || list.ordered !== ordered || (li[1].length >= 2) !== list.nested) { list = { node: el(ordered ? 'ol' : 'ul'), ordered, nested: li[1].length >= 2 }; (list.nested && box.lastElementChild?.lastElementChild ? box.lastElementChild.lastElementChild : box).append(list.node); }
+      const item = el('li'); inline(li[3], item); list.node.append(item); continue;
+    }
+    if (list && /^\s+\S/.test(ln)) { const lastLi = list.node.lastElementChild; if (lastLi) { lastLi.append(' '); inline(st, lastLi); continue; } }
+    list = null; para.push(st);
+  }
+  flush();
+}
+function setOpen(on) {
+  R.open = on; R.el.classList.toggle('on', on); R.btn.setAttribute('aria-pressed', String(on));
+  if (!on) { R.topic = ''; R.seq++; }
+}
+function noteRow(m) {
+  const b = el('button', 'it'); b.type = 'button';
+  b.append(el('b', '', m.title || m.topic), el('span', '', m.desc || ''));
+  b.onclick = () => goNote(m.topic);
+  return b;
+}
+async function showList(query = R.q.value) {
+  R.topic = ''; R.back.hidden = true;
+  const my = ++R.seq, q = String(query || '').trim().toLowerCase();
+  let list = [...graph.notes.values()];
+  if (q) {
+    const terms = q.split(/\s+/).filter(Boolean);
+    const hit = m => { const hay = (m.title + ' ' + m.desc + ' ' + m.topic).toLowerCase(); return terms.every(t => hay.includes(t)); };
+    const first = list.filter(hit), seen = new Set(first.map(m => m.topic));
+    // full text: the topics her own memory search finds (the note paragraphs are rows)
+    try {
+      const r = await api('/api/brain/match?q=' + encodeURIComponent(q.slice(0, 200)));
+      if (my !== R.seq) return;
+      for (const id of r.ids || []) { const n = graph.byRow.get(+id), t = n && n.parent && n.parent.key.startsWith('topic:') ? n.parent.key.slice(6) : ''; if (t && !seen.has(t) && graph.notes.has(t)) { seen.add(t); first.push(graph.notes.get(t)); } }
+    } catch { /* bridge busy: titles only */ }
+    list = first;
+  } else list.sort((a, b) => String(b.modified).localeCompare(String(a.modified)) || a.title.localeCompare(b.title));
+  if (my !== R.seq) return;
+  R.body.replaceChildren(...(list.length ? list.map(noteRow) : [el('div', 'empty', 'No notes match.')]));
+  R.body.scrollTop = 0;
+}
+/** Fly to a note's star (the click handler opens it) or, with no star, just open it. */
+function goNote(topic) {
+  const n = noteNode(topic);
+  if (n) bus.emit('click', { idx: n.idx, x: 0, y: 0 }); else openNote(topic);
+}
+async function openNote(topic, fragText = '') {
+  if (!R.open) setOpen(true);
+  R.topic = topic; R.back.hidden = false;
+  const my = ++R.seq;
+  let d = R.cache.get(topic);
+  if (!d || d.notesV !== graph.notesV) {
+    try { d = await api('/api/brain/note?topic=' + encodeURIComponent(topic)); d.notesV = graph.notesV; R.cache.set(topic, d); }
+    catch { d = { ...(graph.notes.get(topic) || { topic, title: topic }), body: '' }; }
+  }
+  if (my !== R.seq) return;
+  const n = noteNode(topic), cl = n ? (graph.clusters.get(n.cluster) || {}).label : '';
+  const nt = el('div', 'nt');
+  nt.append(el('div', 'k', [cl, d.modified].filter(Boolean).join(' · ')), el('h1', '', d.title || topic));
+  const md = el('div', 'md'); renderMd(d.body || d.desc || '', md); nt.append(md);
+  const lk = el('div', 'lk');
+  for (const [head, ts] of [['Links', d.links || []], ['Linked from', d.backlinks || []]]) {
+    if (!ts.length) continue;
+    const row = el('div');
+    for (const t of ts) { const c = el('button', 'ch', titleOf(t)); c.type = 'button'; c.onclick = () => goNote(t); row.append(c); }
+    lk.append(el('h5', '', head), row);
+  }
+  if (lk.childElementCount) nt.append(lk);
+  R.body.replaceChildren(nt); R.body.scrollTop = 0;
+  // a paragraph star: mark its block and bring it into view
+  const key = alnum(fragText).slice(0, 40);
+  if (key.length >= 12) for (const b of md.querySelectorAll('p,li,pre')) if (alnum(b.textContent).includes(key)) { b.classList.add('hl'); b.scrollIntoView({ block: 'center' }); break; }
+}
+function initReader() {
+  R.el = $('reader'); R.body = $('rBody'); R.q = $('rQ'); R.back = $('rBack'); R.btn = $('bNotes');
+  R.btn.onclick = () => { if (R.open) setOpen(false); else { setOpen(true); showList(); setTimeout(() => R.q.focus(), 60); } };
+  $('rX').onclick = () => setOpen(false);
+  R.back.onclick = () => showList();
+  R.q.addEventListener('input', () => { clearTimeout(R.qT); R.qT = setTimeout(() => showList(), 180); });
+  R.q.addEventListener('keydown', e => { if (e.key === 'Enter') { const f = R.body.querySelector('.it'); if (f) f.click(); } });
+  R.body.addEventListener('click', e => { const w = e.target.closest('.wl'); if (w) goNote(w.dataset.topic); });
+  addEventListener('keydown', e => { if (e.key === 'Escape' && R.open) { e.stopPropagation(); setOpen(false); } });
+  R.el.addEventListener('wheel', e => e.stopPropagation(), { passive: true });
+}
+
 /* ------------------------------------------------------------------ init */
 export async function init() {
   try { const f = new FontFace('Inter', `url(data:font/woff2;base64,${INTER_WOFF2})`, { weight: '300 600', style: 'normal' }); await f.load(); document.fonts.add(f); }
@@ -293,8 +413,11 @@ export async function init() {
 
   // pointer
   bus.on('hover', e => showTip(e.idx));
+  initReader();
   bus.on('click', e => {
-    showCard(e.idx);
+    const note = e.idx >= 0 ? noteOfStar(e.idx) : null;
+    if (note) { showCard(-1); const n = nodeOf(e.idx); openNote(note.topic, n && n.kind === 'project' ? n.text : ''); }
+    else showCard(e.idx);
     if (e.idx >= 0) { stars.setState(e.idx, ST.TARGET, state.t, state.t + 6, 0); for (const j of neighbours(e.idx).slice(0, 12)) { const s = stars.stateOf(j); if (s === 0 || s === ST.TARGET) stars.setState(j, ST.TARGET, state.t + .12, state.t + 6, 0); } }
   });
   bus.on('click:empty', () => showCard(-1));
@@ -310,5 +433,5 @@ export async function init() {
     karaoke(dt);
     if (now - lastDeclutter > 250) { lastDeclutter = now; declutter(); }
   }, 50);
-  window.__brain = Object.assign(window.__brain || {}, { ui: { card, label, addRow, sayLine } });
+  window.__brain = Object.assign(window.__brain || {}, { ui: { card, label, addRow, sayLine, openNote, showList, setOpen } });
 }

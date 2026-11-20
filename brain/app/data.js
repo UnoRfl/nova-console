@@ -98,6 +98,8 @@ export const graph = {
   starNode: [],              // star index -> node
   clusters: new Map(),       // id -> cluster record (center, labelEl, mains[], places[])
   maxRow: 0, total: 0, skills: [], profile: '',
+  notes: new Map(),          // Claude's project notes: topic -> {topic, title, desc, type, modified, links[], backlinks[]}
+  notesV: '',
 };
 CLUSTERS.forEach((c, i) => {
   const ang = c.a * DEG;
@@ -1016,6 +1018,36 @@ export async function matchRows(query) {
   catch { return searchLocal(query); }
 }
 
+/* ------------------------------------------------------------------ Claude's notes (merged SecondBrain) */
+// Every project topic star IS one of Claude's memory notes. Its [[links]] (and notes named in its text) are drawn
+// as faint lines between topic stars; the reader (ui.js) opens the full note from /api/brain/note.
+const noteEdges = new Map();   // 'a|b' -> edge id
+export const noteNode = topic => { const n = graph.byKey.get('topic:' + topic); return n && !n.gone ? n : null; };
+/** The note a star belongs to (its topic star or one of its paragraphs), or null. */
+export function noteOfStar(idx) {
+  const n = nodeOf(idx); if (!n) return null;
+  const t = n.kind === 'topic' ? n : n.kind === 'project' ? n.parent : null;
+  if (!t || !t.key.startsWith('topic:')) return null;
+  return graph.notes.get(t.key.slice(6)) || null;
+}
+export function applyNotes(list, v) {
+  if (Array.isArray(list)) { graph.notes = new Map(list.filter(m => m && m.topic).map(m => [m.topic, m])); if (v != null) graph.notesV = v; }
+  for (const [topic, m] of graph.notes) {
+    const a = noteNode(topic); if (!a) continue;
+    a.note = m;
+    if (m.title && a.label !== m.title) a.label = m.title;
+    for (const l of m.links || []) {
+      const b = noteNode(l); if (!b) continue;
+      const k = a.idx < b.idx ? a.idx + '|' + b.idx : b.idx + '|' + a.idx;
+      if (noteEdges.has(k)) continue;
+      noteEdges.set(k, edges.add(a.idx, b.idx, a.cluster === b.cluster ? .07 : .04, loaded ? { drawOn: state.t, from: a.idx } : undefined));
+    }
+  }
+}
+async function refreshNotes() {
+  try { const d = await api('/api/brain/notes'); applyNotes(d.notes, d.notes_v); } catch { /* bridge busy: next poll */ }
+}
+
 /* ------------------------------------------------------------------ labels */
 let labelsOn = false;
 function addClusterLabel(cl) {
@@ -1072,6 +1104,7 @@ export async function load() {
     createNode({ key: 'skill:' + s.name.toLowerCase(), type: 'main', kind: 'skill', cluster: 'skills', label: name, text: when || s.text, size: 24 });
   }
   loading = false; loadCounts = null; loadIds = null;
+  applyNotes(d.notes || [], d.notes_v || '');
   for (const n of graph.nodes) if (n.kids.length && n.latest) settleBright(n);
   historyNode();
   restorePlaces();
@@ -1114,6 +1147,8 @@ export async function pollNew() {
   const added = []; let rebound = 0;
   for (const r of rows) { const x = addRow(r, { born: true, _noted: true }); if (x.rebound) rebound++; else if (x.created.length || x.bound) added.push(x); }
   graph.total = d.count;
+  if (d.notes_v && d.notes_v !== graph.notesV) await refreshNotes();
+  else if (added.some(x => x.created.some(n => n.kind === 'topic'))) applyNotes();
   // stars whose row is still missing are reported now -- or, while a re-index is landing (rows just came back),
   // on the next poll, so a re-index split across two polls never drops stars that come straight back
   let said = goneLater.filter(n => n.gone); goneLater = [];
@@ -1133,4 +1168,4 @@ export function snapshot() {
 }
 
 window.__brain = Object.assign(window.__brain || {}, { graph, data: { addRow, ensure, createNode, fileNode, folderNode, webNode, toolNode, skillNode, historyNode,
-  starsOfRows, neighbours, nodeOf, matchRows, pollNew, slotFor, provisional, diaryArm, normPath, normText, seedPlaces, hintTopic, clusterOfTopic, snapshot } });
+  starsOfRows, neighbours, nodeOf, matchRows, pollNew, noteNode, noteOfStar, applyNotes, noteEdges, slotFor, provisional, diaryArm, normPath, normText, seedPlaces, hintTopic, clusterOfTopic, snapshot } });

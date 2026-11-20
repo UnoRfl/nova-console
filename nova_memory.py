@@ -384,6 +384,142 @@ def import_project_notes() -> int:
     return n
 
 
+# ------------------------------------------------- Claude's notes, kept in sync
+# The brain view shows the Claude Code memory notes as one galaxy with hers
+# (2026-11-20: the separate SecondBrain page was merged in). sync_project_notes
+# re-indexes ONLY the notes whose paragraphs changed, so unchanged notes keep
+# their row ids (their stars never move). notes_meta / note() feed the reader.
+_LINK = re.compile(r"\[\[([^\]|#]+)")
+_notes_cache: dict = {"sig": None, "meta": [], "bodies": {}}
+
+
+def _note_parts(raw: str) -> tuple[dict, str]:
+    """Frontmatter fields (name, description, type, modified) and the body."""
+    fm: dict = {}
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?", raw, flags=re.S)
+    body = raw[m.end():] if m else raw
+    for line in (m.group(1).splitlines() if m else []):
+        kv = re.match(r"^\s*(name|description|type|modified):\s*(.*)$", line)
+        if kv and kv.group(1) not in fm:
+            fm[kv.group(1)] = kv.group(2).strip().strip('"')
+    return fm, body.strip()
+
+
+def _note_rows(f: Path) -> tuple[str, list[str]]:
+    """The rows one note becomes (same split as import_project_notes)."""
+    raw = f.read_text(encoding="utf-8", errors="replace")
+    fm, body = _note_parts(raw)
+    topic, out = f.stem, []
+    if fm.get("description"):
+        out.append(f"{topic}: {fm['description']}")
+    for para in re.split(r"\n\s*\n", body):
+        para = " ".join(para.split())
+        if len(para) < 40:
+            continue
+        out.extend(para[i:i + 600] for i in range(0, len(para), 600))
+    return topic, [repair(" ".join(t.split())) for t in out]
+
+
+def _note_files() -> list[Path]:
+    if not PROJECT_NOTES.is_dir():
+        return []
+    return sorted(f for f in PROJECT_NOTES.glob("*.md") if f.name != "MEMORY.md")
+
+
+def sync_project_notes() -> dict:
+    """Bring the project rows in line with the notes folder, note by note.
+    Returns {"changed": [...topics], "removed": [...topics]}; cheap when nothing changed."""
+    files = _note_files()
+    if not files:
+        return {"changed": [], "removed": []}
+    with _lock, connect() as db:
+        have: dict[str, list[str]] = {}
+        for r in db.execute("SELECT source, text FROM memory WHERE kind='project' ORDER BY id"):
+            have.setdefault(r["source"], []).append(r["text"])
+    owner = {t: src for src, ts in have.items() for t in ts}
+    changed, removed = [], []
+    for f in files:
+        topic, want = _note_rows(f)
+        # add() skips a text that is already stored, so a repeated paragraph is expected once
+        want = [t for t in dict.fromkeys(want) if t and owner.get(t, f.name) == f.name]
+        if have.pop(f.name, None) == want:
+            continue
+        with _lock, connect() as db:
+            db.execute("DELETE FROM memory WHERE kind='project' AND source=?", (f.name,))
+        for t in want:
+            add(t, kind="project", source=f.name, topic=topic)
+        changed.append(topic)
+    for src in have:                     # notes deleted from the folder
+        with _lock, connect() as db:
+            db.execute("DELETE FROM memory WHERE kind='project' AND source=?", (src,))
+        removed.append(src[:-3] if src.endswith(".md") else src)
+    return {"changed": changed, "removed": removed}
+
+
+def notes_signature() -> str:
+    """Changes whenever a note is added, removed or edited (names + mtimes)."""
+    parts = []
+    for f in _note_files() + [PROJECT_NOTES / "MEMORY.md"]:
+        try:
+            parts.append(f"{f.name}:{f.stat().st_mtime_ns}")
+        except OSError:
+            pass
+    return str(abs(hash("|".join(parts))))
+
+
+def _load_notes() -> None:
+    sig = notes_signature()
+    if sig == _notes_cache["sig"]:
+        return
+    files = _note_files()
+    slugs = {f.stem for f in files}
+    titles: dict[str, str] = {}
+    try:
+        idx = (PROJECT_NOTES / "MEMORY.md").read_text(encoding="utf-8", errors="replace")
+        for t, s in re.findall(r"- \[([^\]]+)\]\(([^)]+)\.md\)", idx):
+            titles[s] = t
+    except OSError:
+        pass
+    meta, bodies = [], {}
+    for f in files:
+        try:
+            fm, body = _note_parts(f.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        s = f.stem
+        links = {l.strip() for l in _LINK.findall(body)} & slugs
+        for o in slugs:                  # a note named in the text links too (as SecondBrain did)
+            if o != s and re.search(r"(?<![\w-])" + re.escape(o) + r"(?![\w-])", body):
+                links.add(o)
+        links.discard(s)
+        bodies[s] = body
+        meta.append({"topic": s, "title": titles.get(s) or s.replace("-", " ").title(),
+                     "desc": fm.get("description", ""), "type": fm.get("type", ""),
+                     "modified": (fm.get("modified") or "")[:10], "links": sorted(links)})
+    back: dict[str, list[str]] = {}
+    for m in meta:
+        for l in m["links"]:
+            back.setdefault(l, []).append(m["topic"])
+    for m in meta:
+        m["backlinks"] = sorted(back.get(m["topic"], []))
+    _notes_cache.update(sig=sig, meta=meta, bodies=bodies)
+
+
+def notes_meta() -> list[dict]:
+    """Every note: topic, title, desc, type, modified, links, backlinks."""
+    _load_notes()
+    return [dict(m) for m in _notes_cache["meta"]]
+
+
+def note(topic: str) -> dict | None:
+    """One note in full (body without frontmatter) plus its meta, or None."""
+    _load_notes()
+    for m in _notes_cache["meta"]:
+        if m["topic"] == topic:
+            return {**m, "body": _notes_cache["bodies"].get(topic, "")}
+    return None
+
+
 # --------------------------------------------------------------------- main
 
 def main() -> int:

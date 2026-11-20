@@ -2708,6 +2708,32 @@ def trail_places(line: str) -> list[tuple[str, str, str]]:
     return out or [("tool", name, name)]
 
 
+def brain_notes() -> list[dict]:
+    """notes_meta with titles and descriptions masked, for the brain view."""
+    out = nova_memory.notes_meta()
+    for m in out:
+        m["title"] = mask_secrets(m["title"])
+        m["desc"] = mask_secrets(m["desc"])
+    return out
+
+
+def sync_notes_forever() -> None:
+    """Keep her copy of Claude's project notes current (was a one-off import).
+    Checks the folder's names+mtimes every 60 s; re-indexes only edited notes."""
+    last = None
+    while True:
+        try:
+            sig = nova_memory.notes_signature()
+            if sig != last:
+                got = nova_memory.sync_project_notes()
+                if got["changed"] or got["removed"]:
+                    log(f"notes sync: {len(got['changed'])} changed, {len(got['removed'])} removed")
+                last = sig
+        except Exception as exc:          # never let it take the bridge down
+            log(f"notes sync error: {exc}")
+        time.sleep(60)
+
+
 def brain_trail(days: int = 30, limit: int = 300) -> list[dict]:
     """Where she has been in the last `days` days, most used first: the files
     and folders she opened, the sites and pages she read and the tools she
@@ -2922,7 +2948,9 @@ class Handler(BaseHTTPRequestHandler):
             out = nova_memory.brain_rows(since)
             for r in out["rows"]:
                 r["text"] = mask_secrets(r["text"])
+            out["notes_v"] = nova_memory.notes_signature()   # changes -> the view refetches /api/brain/notes
             if since == 0:
+                out["notes"] = brain_notes()
                 skills = []
                 try:
                     for f in sorted(nova_skills.SKILLS_DIR.glob("*.md")):
@@ -2935,6 +2963,24 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     out["profile"] = ""
             self.send_json(out)
+            return
+
+        if route == "/api/brain/notes":
+            # Claude's project notes as the galaxy shows them: titles, links, backlinks.
+            self.send_json({"notes": brain_notes(), "notes_v": nova_memory.notes_signature()})
+            return
+
+        if route == "/api/brain/note":
+            # One note in full, for the reader (the folder is never addressed by path).
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            topic = (q.get("topic") or [""])[0]
+            got = nova_memory.note(topic) if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,80}", topic) else None
+            if not got:
+                self.send_json({"error": "not_found"}, 404)
+                return
+            got["body"] = mask_secrets(got["body"])
+            got["desc"] = mask_secrets(got["desc"])
+            self.send_json(got)
             return
 
         if route == "/api/brain/match":
@@ -4284,6 +4330,7 @@ def main() -> int:
             except Exception as exc:          # never let housekeeping take the bridge down
                 log(f"housekeep error: {exc}")
     threading.Thread(target=keep_chats_small, daemon=True).start()
+    threading.Thread(target=sync_notes_forever, daemon=True).start()
     httpd.permissions = Permissions(activity)
     guests: dict[str, Backend] = {}
 
