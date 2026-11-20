@@ -190,6 +190,160 @@ function Move-NovaPanel {
     [void][NovaWin32]::SetForegroundWindow($h)
 }
 
+<#
+    The panel as its own app on the taskbar (Sir, 2026-11-20: "pin it like a real app").
+
+    Chrome gives an --app window its own AppUserModelID but no relaunch command,
+    so Windows pinned chrome.exe. We stamp the window with Nova's own ID, a
+    relaunch command (NovaOpen.vbs: raise / start-if-down / refuse-if-OFF) and
+    the Nova icon, and keep a Start Menu shortcut carrying the same ID -- that
+    shortcut is what the taskbar pins and takes its icon from. Chrome clears
+    these properties itself when the window closes.
+#>
+$script:NovaAppId = 'Uno.Nova.Panel'
+
+if (-not ('NovaAppIdentity' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+
+public static class NovaAppIdentity {
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
+    public struct PROPVARIANT { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPropertyStore {
+        void GetCount(out uint c);
+        void GetAt(uint i, out PROPERTYKEY k);
+        void GetValue(ref PROPERTYKEY k, out PROPVARIANT v);
+        void SetValue(ref PROPERTYKEY k, ref PROPVARIANT v);
+        void Commit();
+    }
+
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IShellLinkW {
+        void GetPath(IntPtr a, int b, IntPtr c, uint d);
+        void GetIDList(out IntPtr p);
+        void SetIDList(IntPtr p);
+        void GetDescription(IntPtr a, int b);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string s);
+        void GetWorkingDirectory(IntPtr a, int b);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string s);
+        void GetArguments(IntPtr a, int b);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string s);
+        void GetHotkey(out short h);
+        void SetHotkey(short h);
+        void GetShowCmd(out int c);
+        void SetShowCmd(int c);
+        void GetIconLocation(IntPtr a, int b, out int i);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string s, int i);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string s, uint r);
+        void Resolve(IntPtr h, uint f);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string s);
+    }
+
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    class ShellLink { }
+
+    [DllImport("shell32.dll")]
+    static extern int SHGetPropertyStoreForWindow(IntPtr h, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IPropertyStore ps);
+
+    static readonly Guid AppUserModel = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+    // 5 = ID, 2 = RelaunchCommand, 3 = RelaunchIconResource, 4 = RelaunchDisplayNameResource
+
+    static void Put(IPropertyStore ps, uint pid, string value) {
+        var k = new PROPERTYKEY { fmtid = AppUserModel, pid = pid };
+        var v = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni(value) };   // VT_LPWSTR
+        try { ps.SetValue(ref k, ref v); } finally { Marshal.FreeCoTaskMem(v.p); }
+    }
+
+    public static string Get(IntPtr hwnd, uint pid) {
+        Guid iid = typeof(IPropertyStore).GUID; IPropertyStore ps;
+        if (SHGetPropertyStoreForWindow(hwnd, ref iid, out ps) != 0) return null;
+        try {
+            var k = new PROPERTYKEY { fmtid = AppUserModel, pid = pid };
+            PROPVARIANT v; ps.GetValue(ref k, out v);
+            return v.vt == 31 ? Marshal.PtrToStringUni(v.p) : null;
+        } finally { Marshal.ReleaseComObject(ps); }
+    }
+
+    public static bool StampWindow(IntPtr hwnd, string appId, string relaunch, string icon, string name) {
+        Guid iid = typeof(IPropertyStore).GUID; IPropertyStore ps;
+        if (SHGetPropertyStoreForWindow(hwnd, ref iid, out ps) != 0) return false;
+        try {
+            Put(ps, 2, relaunch);
+            Put(ps, 3, icon);
+            Put(ps, 4, name);
+            Put(ps, 5, appId);   // last: the taskbar regroups the button when the ID changes
+            return true;
+        } finally { Marshal.ReleaseComObject(ps); }
+    }
+
+    public static void WriteShortcut(string lnk, string target, string args, string workDir, string icon, string desc, string appId) {
+        var link = (IShellLinkW)new ShellLink();
+        link.SetPath(target);
+        link.SetArguments(args);
+        link.SetWorkingDirectory(workDir);
+        link.SetIconLocation(icon, 0);
+        link.SetDescription(desc);
+        var ps = (IPropertyStore)link;
+        Put(ps, 5, appId);
+        ps.Commit();
+        ((IPersistFile)link).Save(lnk, true);
+        Marshal.ReleaseComObject(link);
+    }
+}
+'@
+}
+
+function Get-NovaAppLaunch {
+    # What every Nova entry point runs: the same rules as the Desktop shortcut.
+    $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
+    $vbs = Join-Path $script:NovaRoot 'NovaOpen.vbs'
+    $ico = Join-Path $script:NovaRoot 'NovaPanel.ico'
+    return @{ Exe = $wscript; Args = "`"$vbs`""; Icon = $ico; Command = "`"$wscript`" `"$vbs`"" }
+}
+
+function Install-NovaAppShortcut {
+    <#
+        Start Menu "Nova" shortcut carrying the panel's AppUserModelID. Windows
+        matches the running window to it, so the taskbar button gets its icon
+        and "Pin to taskbar" pins this shortcut, not Chrome. -Force rewrites it;
+        otherwise it is only created when missing. Also stamps the Desktop one.
+    #>
+    param([switch]$Force)
+    $l = Get-NovaAppLaunch
+    $start = Join-Path ([Environment]::GetFolderPath('Programs')) 'Nova.lnk'
+    if ((Test-Path $start) -and -not $Force) { return }
+    $targets = @($start)
+    $desk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Nova.lnk'
+    if (Test-Path $desk) { $targets += $desk }
+    foreach ($lnk in $targets) {
+        try {
+            [NovaAppIdentity]::WriteShortcut($lnk, $l.Exe, $l.Args, $script:NovaRoot, $l.Icon, 'Nova -- open the panel', $script:NovaAppId)
+            Write-NovaLog "app shortcut written: $lnk"
+        } catch {
+            Write-NovaLog "app shortcut failed ($lnk): $($_.Exception.Message)"
+        }
+    }
+}
+
+function Set-NovaPanelIdentity {
+    param([Parameter(Mandatory = $true)][IntPtr]$Handle)
+    try {
+        if ([NovaAppIdentity]::Get($Handle, 5) -eq $script:NovaAppId) { return $true }
+        $l = Get-NovaAppLaunch
+        return [NovaAppIdentity]::StampWindow($Handle, $script:NovaAppId, $l.Command, "$($l.Icon),0", 'Nova')
+    } catch {
+        Write-NovaLog "panel identity failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Show-NovaPanel {
     param(
         [int]$Width  = 1280,
@@ -205,6 +359,8 @@ function Show-NovaPanel {
     $open = Find-NovaWindow
     if ($open) {
         $h = $open.MainWindowHandle
+        Install-NovaAppShortcut
+        [void](Set-NovaPanelIdentity -Handle $h)
         # The panel is a maximized window by default (Sir, 2026-11-20: "windowed fullscreen").
         if ([NovaWin32]::IsIconic($h) -or -not [NovaWinZoom]::IsZoomed($h)) { [void][NovaWin32]::ShowWindow($h, 3) }  # SW_MAXIMIZE
         [void][NovaWin32]::SetForegroundWindow($h)
@@ -214,6 +370,7 @@ function Show-NovaPanel {
         return $true
     }
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    Install-NovaAppShortcut
 
     $url = Get-NovaUrl
     if (-not $url) {
@@ -274,6 +431,7 @@ function Show-NovaPanel {
         Start-Sleep -Milliseconds 250
         $win = Find-NovaWindow
         if ($win) {
+            [void](Set-NovaPanelIdentity -Handle $win.MainWindowHandle)
             if ($Screen) { Move-NovaPanel -Window $win -Screen $Screen -Maximize:$Maximize }
             elseif (-not [NovaWinZoom]::IsZoomed($win.MainWindowHandle)) { [void][NovaWin32]::ShowWindow($win.MainWindowHandle, 3) }
             Set-Content -Path $pidFile -Value $win.Id -Encoding utf8
