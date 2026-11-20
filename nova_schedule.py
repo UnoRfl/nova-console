@@ -41,6 +41,8 @@ def load() -> dict:
     data.setdefault("late_nudge", True)
     data.setdefault("skip_dates", [])
     data.setdefault("until", "")
+    data.setdefault("from", "")
+    data.setdefault("term_note", "")
     return data
 
 
@@ -70,8 +72,113 @@ def active_on(data: dict, lt: time.struct_time) -> bool:
             return False
     except Exception:                             # noqa: BLE001 -- never let this stop a reminder
         pass
-    until = data.get("until") or ""
-    return not (until and date > until)
+    return in_term(data, date)
+
+
+# ------------------------------------------------------------------ the term
+# Uno, 2026-11-20: he told her his finals were over and he was enrolling for the
+# next term, and she still rang him for Friday's classes. The timetable now
+# knows its term: "from" (first day, may be empty) to "until" (last day). Out
+# of term nothing fires, and every reader says "between terms" instead of
+# reciting the old classes.
+
+def in_term(data: dict, date: str) -> bool:
+    """Inside the term this timetable belongs to: from <= date <= until (either may be empty)."""
+    first = data.get("from") or ""
+    last = data.get("until") or ""
+    return not ((first and date < first) or (last and date > last))
+
+
+def term_status(now: float | None = None) -> str:
+    """'' while the timetable is in force today; otherwise one plain line saying why not."""
+    now = time.time() if now is None else now
+    data = load()
+    date = time.strftime("%Y-%m-%d", time.localtime(now))
+    note = data.get("term_note") or ""
+    tail = f" ({note})" if note else ""
+    if not data["classes"]:
+        return "No timetable is saved."
+    if data.get("until") and date > data["until"]:
+        return (f"Between terms: the last timetable ended on {data['until']}{tail}. Its classes are NOT in "
+                "force: do not list them as his classes or remind him of them. Once he has enrolled, ask him "
+                "for the new timetable and save it with new_term.")
+    if data.get("from") and date < data["from"]:
+        return f"The new term starts on {data['from']}{tail}; no classes before then."
+    return ""
+
+
+def _day(s: str) -> str:
+    s = (s or "").strip()
+    time.strptime(s, "%Y-%m-%d")          # ValueError when it is not a real date
+    return s
+
+
+def end_term(last_day: str, note: str = "") -> str:
+    """The term is over: classes stop after last_day (YYYY-MM-DD)."""
+    data = load()
+    data["until"] = _day(last_day)
+    if note:
+        data["term_note"] = note.strip()[:300]
+    save(data)
+    return f"Timetable ended: no class reminders after {data['until']}."
+
+
+def classes_off(first_day: str, last_day: str = "", reason: str = "") -> str:
+    """No classes from first_day to last_day (inclusive), e.g. exam week or a trip; term goes on."""
+    a = _day(first_day)
+    b = _day(last_day) if last_day else a
+    if b < a:
+        a, b = b, a
+    t0 = time.mktime(time.strptime(a, "%Y-%m-%d")) + 43200
+    days = []
+    while len(days) < 92:
+        d = time.strftime("%Y-%m-%d", time.localtime(t0 + len(days) * 86400))
+        if d > b:
+            break
+        days.append(d)
+    data = load()
+    data["skip_dates"] = sorted(set(data["skip_dates"]) | set(days))
+    if reason:
+        data.setdefault("skip_notes", {})[f"{a}..{b}"] = reason.strip()[:200]
+    save(data)
+    return f"No class reminders from {a} to {b} ({len(days)} days)."
+
+
+def new_term(classes: list, first_day: str = "", last_day: str = "", note: str = "") -> str:
+    """Replace the timetable with a new term's classes. The old one is kept in past_terms."""
+    clean = []
+    for c in classes or []:
+        day = str(c.get("day", "")).strip().lower()[:3]
+        if day not in DAYS:
+            raise ValueError(f"bad day {c.get('day')!r}: use mon..sun")
+        for k in ("start", "end"):
+            _minutes(str(c.get(k, "")))
+        clean.append({"name": str(c.get("name") or "class").strip(), "day": day,
+                      "start": c["start"], "end": c["end"], "where": str(c.get("where") or "").strip()})
+    if not clean:
+        raise ValueError("no classes given")
+    data = load()
+    if data["classes"]:
+        data.setdefault("past_terms", []).append({"classes": data["classes"], "from": data.get("from", ""),
+                                                  "until": data.get("until", ""), "note": data.get("term_note", "")})
+    today = time.strftime("%Y-%m-%d")
+    data.update({"classes": clean, "from": _day(first_day) if first_day else "",
+                 "until": _day(last_day) if last_day else "", "term_note": note.strip()[:300],
+                 "skip_dates": [d for d in data["skip_dates"] if d >= today]})
+    save(data)
+    return (f"New timetable saved: {len(clean)} classes"
+            + (f", from {data['from']}" if data["from"] else "") + (f" to {data['until']}" if data["until"] else "") + ".")
+
+
+def outline() -> str:
+    """One short line per weekday, class names only (for the cross-check note)."""
+    data = load()
+    rows = []
+    for i, day in enumerate(DAY_NAMES):
+        cs = classes_on(data, i)
+        if cs:
+            rows.append(day[:3] + ": " + ", ".join(c["name"] for c in cs))
+    return "; ".join(rows)
 
 
 def classes_on(data: dict, weekday: int) -> list[dict]:
@@ -113,6 +220,10 @@ def week_text() -> str:
     if not data["classes"]:
         return "No timetable is saved."
     lines = []
+    status = term_status()
+    if status:
+        lines.append(status)
+        lines.append("The old timetable, for reference only:")
     for i, day in enumerate(DAY_NAMES):
         cs = classes_on(data, i)
         if cs:

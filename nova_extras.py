@@ -220,6 +220,9 @@ def gather_briefing(events=None, since: float = 0.0, conf: dict | None = None) -
         lt = time.localtime(now)
         if nova_schedule.active_on(data, lt):
             parts["classes"] = [nova_schedule.describe(c) for c in nova_schedule.today(now)]
+        elif not nova_schedule.in_term(data, time.strftime("%Y-%m-%d", lt)):
+            if data["classes"]:
+                parts["no_school"] = "No classes: you are between terms."
         elif nova_schedule.classes_on(data, lt.tm_wday):
             parts["no_school"] = "There is no school today."
     except Exception:                                 # noqa: BLE001

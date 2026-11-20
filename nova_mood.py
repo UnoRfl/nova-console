@@ -34,7 +34,7 @@ TOOL_GROUPS = [
     ("music", ("spotify", "tv", "volume", "mute", "media_key")),
     ("memory", ("remember", "recall", "forget", "save_note", "save_rule", "list_rules", "delete_rule",
                 "save_skill", "list_skills", "day_log", "habits", "open_loops", "close_loop",
-                "remind", "reminder", "routine", "meeting", "notes_")),
+                "remind", "reminder", "end_term", "classes_off", "new_term", "routine", "meeting", "notes_")),
     ("looking", ("capture_screen", "read_screen", "desktop_look", "look_at_this", "look_through_camera",
                  "web_screenshot", "web_show", "list_windows", "foreground_app", "presence")),
     ("talking", ("gmail", "messenger", "whatsapp", "call_me", "minecraft_say", "say")),

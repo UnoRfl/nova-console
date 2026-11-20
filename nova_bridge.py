@@ -387,12 +387,29 @@ Examples of the tone only; never reuse their wording or their content:
   He: "I haven't eaten yet"
   You: "It is nearly four, Sir. Go and eat; I shall guard the code." """
 
+# Keeping what she knows true. Uno, 2026-11-20: he told her his finals were over
+# and he was enrolling for the next term; she set the enrolment reminders but kept
+# ringing him for the old classes. "She should check my previous information and
+# update it accordingly based on what I say ... or at least ask me if she's not sure."
+RECONCILE_BLOCK = """KEEP WHAT YOU KNOW TRUE. When he tells you something about his life, plans,
+school, work, people or things, do not just answer the sentence: put it beside what you
+already hold (the memories recalled with his request, his timetable via class_schedule,
+his reminders and meetings, your notes) and reason out what it implies. Finals over and
+enrolling next term means the old timetable is finished; a cancelled trip means its
+reminders go; a new job changes his hours. If something you hold is now wrong, fix it in
+the same turn with your tools (end_term, classes_off, new_term, cancel_reminder, forget
+then remember) and say in one short clause what you changed. If you genuinely cannot
+tell whether it still holds, ask him one short, specific question about that fact
+instead of guessing. That is not asking permission, which he does not want; it is
+checking a fact only he knows. A [CROSS-CHECK] note with his request lists what you
+hold on the subject; if nothing in it conflicts, say nothing about it."""
+
 PERSONA_CORE = """You are NOVA, the household assistant of the man whose PC you run on.
 Address him as "Sir". You are his butler and by now something of a friend:
 composed, quick, dryly funny, warm underneath, entirely unflappable. Never
 grovel, never gush, never pad an answer to seem helpful.
 
-""" + HUMOUR_BLOCK + "\n\n" + CARE_BLOCK + "\n\n" + LANGUAGE_BLOCK + """
+""" + HUMOUR_BLOCK + "\n\n" + CARE_BLOCK + "\n\n" + RECONCILE_BLOCK + "\n\n" + LANGUAGE_BLOCK + """
 
 Your reply is read aloud by a speech synthesiser, so:
 - One to three sentences unless he asks you to go long.
@@ -3985,6 +4002,19 @@ class Handler(BaseHTTPRequestHandler):
                           "request: " + "; ".join(forgotten) + "]")
             if recalled:
                 asked += "\n\n" + recalled
+            # He is telling her about his own life: lay the timetable and the
+            # reminders on that subject beside it, so she can see what his news
+            # makes out of date (nova_reconcile).
+            xcheck = ""
+            if profile in ("owner", "remote"):
+                try:
+                    import nova_reconcile
+                    xcheck = nova_reconcile.block(prompt, events.reminders.list(), recalled=bool(recalled))
+                except Exception as exc:              # noqa: BLE001
+                    log(f"cross-check failed: {type(exc).__name__}: {exc}")
+                if xcheck:
+                    asked += "\n\n" + xcheck
+                    log("cross-check attached: " + str(xcheck.count("\n- ")) + " lines")
             if profile in ("owner", "remote"):
                 # The brain view lights up exactly the rows she was handed,
                 # rings the near misses and drops the searched-for words into
@@ -4008,6 +4038,8 @@ class Handler(BaseHTTPRequestHandler):
             # pointing at, so she never has to ask what "this" is. Only at the
             # desk -- a phone has no business receiving the desk's screen.
             route_text = prompt
+            if xcheck:
+                route_text = prompt + " (check my schedule and reminders)"   # she may need to update: tools
             if profile == "owner":
                 try:
                     pointing = nova_initiative.deictic_context(prompt, events.presence.clip_changed_at)

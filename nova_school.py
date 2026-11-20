@@ -470,7 +470,8 @@ def mark_said(key: str) -> bool:
 def has_classes(date: str) -> bool:
     import nova_schedule
     lt = time.strptime(date, "%Y-%m-%d")
-    return bool(nova_schedule.classes_on(nova_schedule.load(), lt.tm_wday))
+    data = nova_schedule.load()
+    return nova_schedule.in_term(data, date) and bool(nova_schedule.classes_on(data, lt.tm_wday))
 
 
 def heads_up(now: float | None = None) -> list[tuple[str, bool]]:

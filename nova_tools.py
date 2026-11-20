@@ -72,6 +72,7 @@ TIERS = {
     "web_research": "free", "web_find": "free", "web_text": "free", "web_extract": "free",
     "list_page_watches": "free", "watch_page": "announce", "stop_page_watch": "announce",
     "class_schedule": "free", "school_days": "free", "stock_quote": "free",
+    "end_term": "announce", "classes_off": "announce", "new_term": "announce",
     "spotify_play": "announce",
     "habits": "free",
     "tv": "announce",             # Sir's LG TV on the home Wi-Fi (nova_tv.py)
@@ -588,7 +589,9 @@ def remind(text: str, date: str = "", time: str = "", when: str = "", daily: boo
     November at 9am") is a fallback. daily=true repeats every day; weekly_on="monday" every week.
     with as_request, the text is run as a request to Nova at that time instead of spoken.
     The reply states the exact day it was stored for: check it matches what Sir asked, and
-    tell him that day and time. Do not set the same reminder twice."""
+    tell him that day and time. Do not set the same reminder twice. If the news behind the
+    reminder changes his timetable (term over, days off), fix that too (end_term /
+    classes_off) -- a reminder alone does not stop the old class nudges."""
     import time as _t
     r = bridge("/api/reminders", {"text": text, "date": date, "time": time, "when": when, "daily": daily,
                                   "weekly_on": weekly_on, "as_request": as_request})
@@ -674,7 +677,7 @@ def schedule_meeting(title: str, date: str, time: str = "", where: str = "", who
         day = _t.strftime("%Y-%m-%d", _t.localtime(start))
         lt = _t.localtime(start)
         mins = lt.tm_hour * 60 + lt.tm_min
-        if not nova_school.no_school(day):
+        if not nova_school.no_school(day) and ns.in_term(ns.load(), day):
             for c in ns.classes_on(ns.load(), lt.tm_wday):
                 a, b = (int(x.split(":")[0]) * 60 + int(x.split(":")[1]) for x in (c["start"], c["end"]))
                 if a - 30 <= mins < b:
@@ -806,15 +809,16 @@ def presence() -> str:
 
 def class_schedule(day: str = "") -> str:
     """Sir's class timetable. day: "" = the whole week, "today", "tomorrow", "next",
-    or a weekday name. Reminders 10 minutes before each class are automatic; to change
-    the timetable, edit ~/.nova/schedule.json (24-hour times, day = mon..sun)."""
+    or a weekday name. Reminders 10 minutes before each class are automatic. It says
+    when the term is over (between terms): then the old classes are NOT his classes.
+    To change it use end_term, classes_off or new_term."""
     import time
     import nova_schedule as ns
     d = day.strip().lower()
     if d == "next":
         nxt = ns.next_class()
         if not nxt:
-            return "No upcoming class."
+            return ("No upcoming class. " + ns.term_status()).strip()
         c, start = nxt
         mins = int((start - time.time()) // 60)
         return f"{ns.describe(c)} on {time.strftime('%A', time.localtime(start))} (in {mins // 60}h {mins % 60}m)."
@@ -826,6 +830,10 @@ def class_schedule(day: str = "") -> str:
         else:
             idx = ns.DAYS.index(d[:3])
         cs = ns.classes_on(ns.load(), idx)
+        ahead = (idx - time.localtime().tm_wday) % 7
+        when = time.time() + ahead * 86400
+        if cs and not ns.in_term(ns.load(), time.strftime("%Y-%m-%d", time.localtime(when))):
+            return f"{ns.DAY_NAMES[idx]}: no classes. " + ns.term_status(when)
         if d in ("today", "tomorrow"):
             import nova_school
             date = time.strftime("%Y-%m-%d", time.localtime(time.time() + (86400 if d == "tomorrow" else 0)))
@@ -834,6 +842,41 @@ def class_schedule(day: str = "") -> str:
                 return f"{ns.DAY_NAMES[idx]}: NO SCHOOL ({off}). Normally: " + "; ".join(ns.describe(c) for c in cs)
         return f"{ns.DAY_NAMES[idx]}: " + ("; ".join(ns.describe(c) for c in cs) if cs else "no classes.")
     return ns.week_text()
+
+
+def end_term(last_day: str, note: str = "") -> str:
+    """Sir's term/semester is over (finals done, sem break, he is enrolling for the next
+    one): stop the old timetable. last_day = his last day of classes, "YYYY-MM-DD"
+    (finished yesterday -> yesterday's date). note = what comes next, e.g. "enrolling
+    for 2nd term, 1st year, week of 23 Nov". Class nudges, calls and briefings stop
+    until new_term saves the next timetable."""
+    import nova_schedule as ns
+    try:
+        return ns.end_term(last_day, note)
+    except ValueError as exc:
+        return f"Not changed: {exc}"
+
+
+def classes_off(first_day: str, last_day: str = "", reason: str = "") -> str:
+    """No classes for a stretch while the term goes on (exam week, a trip, a sick
+    day): dates "YYYY-MM-DD", inclusive. Class reminders are silent on those days."""
+    import nova_schedule as ns
+    try:
+        return ns.classes_off(first_day, last_day, reason)
+    except ValueError as exc:
+        return f"Not changed: {exc}"
+
+
+def new_term(classes: list, first_day: str = "", last_day: str = "", note: str = "") -> str:
+    """Save a NEW term's timetable, replacing the old one (kept as history).
+    classes: [{"name": "...", "day": "mon".."sun", "start": "HH:MM", "end": "HH:MM",
+    "where": "room"}], 24-hour times. first_day/last_day "YYYY-MM-DD" if known.
+    Read the whole list back to him in a sentence after saving."""
+    import nova_schedule as ns
+    try:
+        return ns.new_term(classes, first_day, last_day, note)
+    except (ValueError, KeyError, TypeError) as exc:
+        return f"Not saved: {exc}"
 
 
 def school_days(days_ahead: int = 30, check_now: bool = False) -> str:
@@ -1372,7 +1415,7 @@ def stop_page_watch(which: str) -> str:
 ALL = [web_research, web_find, web_text, web_extract, watch_page, list_page_watches, stop_page_watch,
        briefing, read_screen, save_rule, list_rules, delete_rule, project_status, clipboard_read, clipboard_write,
        save_note, recent_files, notes_start, notes_stop,
-       class_schedule, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
+       class_schedule, end_term, classes_off, new_term, school_days, stock_quote, web_search, web_open, web_read, web_click, web_type, web_keys, web_scroll,
        web_back, web_tabs, web_screenshot, web_show, messenger_chats, messenger_read, gmail_inbox, gmail_read, gmail_send, gmail_reply,
        whatsapp_chats, whatsapp_read, spotify_play, tv, habits, look_through_camera, desktop_look, desktop_click, desktop_type, desktop_keys, desktop_click_at, desktop_scroll,
        open_settings, job_progress, keep_watch, list_watches, cancel_watch, open_loops, close_loop, look_at_this, presence,
