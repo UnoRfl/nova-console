@@ -401,7 +401,7 @@ def _note_parts(raw: str) -> tuple[dict, str]:
     for line in (m.group(1).splitlines() if m else []):
         kv = re.match(r"^\s*(name|description|type|modified):\s*(.*)$", line)
         if kv and kv.group(1) not in fm:
-            fm[kv.group(1)] = kv.group(2).strip().strip('"')
+            fm[kv.group(1)] = kv.group(2).strip().strip('"').replace('\\"', '"')
     return fm, body.strip()
 
 
